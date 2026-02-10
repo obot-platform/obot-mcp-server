@@ -464,7 +464,7 @@ def _extract_configuration_requirements(manifest: Dict[str, Any]) -> Dict[str, A
         if env.get("value"):
             continue
 
-        key = env.get("name", "")
+        key = env.get("key", env.get("name", ""))
         seen_keys.add(key)
         param = {
             "key": key,
@@ -488,7 +488,7 @@ def _extract_configuration_requirements(manifest: Dict[str, Any]) -> Dict[str, A
             if header.get("value"):
                 continue
 
-            key = header.get("name", "")
+            key = header.get("key", header.get("name", ""))
             seen_keys.add(key)
             param = {
                 "key": key,
@@ -624,7 +624,7 @@ def _build_elicitation_model(
 
     for param in requirements.get("optional_parameters", []):
         fields[param["key"]] = (
-            Optional[str],
+            str,
             Field(
                 default="",
                 title=param.get("name", param["key"]),

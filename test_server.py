@@ -167,6 +167,28 @@ class TestExtractConfigurationRequirements:
         assert result["url_configuration"] is None
         assert result["has_oauth_requirement"] is False
 
+    def test_key_field_takes_precedence_over_name(self):
+        manifest = {
+            "runtime": "remote",
+            "env": [
+                {"name": "API Key", "key": "API_KEY", "description": "Key", "required": True},
+            ],
+            "remoteConfig": {
+                "headers": [
+                    {"name": "Vis Request Server", "key": "VIS_REQUEST_SERVER", "description": "Header", "required": True},
+                ]
+            },
+        }
+        result = _extract_configuration_requirements(manifest)
+        env_param = [p for p in result["required_parameters"] if p["type"] == "env"][0]
+        header_param = [p for p in result["required_parameters"] if p["type"] == "header"][0]
+        # key field should be used for the dict key (credential lookup)
+        assert env_param["key"] == "API_KEY"
+        assert header_param["key"] == "VIS_REQUEST_SERVER"
+        # name field should be preserved for display
+        assert env_param["name"] == "API Key"
+        assert header_param["name"] == "Vis Request Server"
+
     def test_file_flag_preserved(self):
         manifest = {
             "env": [
