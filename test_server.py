@@ -616,7 +616,7 @@ class TestConfigureCatalogEntry:
 class TestObotClientNewMethods:
     def _make_client_with_mock(self):
         """Create an ObotClient with a mocked _client."""
-        client = ObotClient(base_url="http://test", token="tok")
+        client = ObotClient(base_url="http://test")
         mock_http = MagicMock()
         client._client = mock_http
         return client, mock_http
@@ -632,7 +632,9 @@ class TestObotClientNewMethods:
         result = await client.list_user_mcp_servers()
 
         assert len(result) == 2
-        mock_http.get.assert_called_once_with("/api/mcp-servers")
+        mock_http.get.assert_called_once_with(
+            "/api/mcp-servers", headers={}
+        )
 
     @pytest.mark.asyncio
     async def test_create_user_mcp_server_without_url(self):
@@ -646,7 +648,9 @@ class TestObotClientNewMethods:
 
         assert result["id"] == "new-1"
         mock_http.post.assert_called_once_with(
-            "/api/mcp-servers", json={"catalogEntryID": "entry-1"}
+            "/api/mcp-servers",
+            json={"catalogEntryID": "entry-1"},
+            headers={},
         )
 
     @pytest.mark.asyncio
@@ -665,6 +669,7 @@ class TestObotClientNewMethods:
                 "catalogEntryID": "entry-1",
                 "manifest": {"remoteConfig": {"url": "https://my.example.com"}},
             },
+            headers={},
         )
 
     @pytest.mark.asyncio
@@ -678,7 +683,9 @@ class TestObotClientNewMethods:
         result = await client.configure_user_mcp_server("s1", {"API_KEY": "val"})
 
         mock_http.post.assert_called_once_with(
-            "/api/mcp-servers/s1/configure", json={"API_KEY": "val"}
+            "/api/mcp-servers/s1/configure",
+            json={"API_KEY": "val"},
+            headers={},
         )
 
     @pytest.mark.asyncio
@@ -692,5 +699,7 @@ class TestObotClientNewMethods:
         result = await client.update_user_mcp_server_url("s1", "https://example.com")
 
         mock_http.post.assert_called_once_with(
-            "/api/mcp-servers/s1/update-url", json={"url": "https://example.com"}
+            "/api/mcp-servers/s1/update-url",
+            json={"url": "https://example.com"},
+            headers={},
         )
