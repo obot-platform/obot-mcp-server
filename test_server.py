@@ -256,6 +256,22 @@ class TestBuildElicitationModel:
         assert "REGION" in fields
         assert not fields["REGION"].is_required()
 
+    def test_sensitive_fields_get_password_format(self):
+        requirements = {
+            "required_parameters": [
+                {"key": "API_KEY", "name": "API Key", "description": "Key", "sensitive": True},
+                {"key": "REGION", "name": "Region", "description": "Region", "sensitive": False},
+            ],
+            "optional_parameters": [
+                {"key": "SECRET", "name": "Secret", "description": "Optional secret", "sensitive": True},
+            ],
+        }
+        Model = _build_elicitation_model(requirements, None)
+        schema = Model.model_json_schema()
+        assert schema["properties"]["API_KEY"]["format"] == "password"
+        assert "format" not in schema["properties"]["REGION"]
+        assert schema["properties"]["SECRET"]["format"] == "password"
+
     def test_url_field_with_hostname(self):
         requirements = {
             "required_parameters": [],

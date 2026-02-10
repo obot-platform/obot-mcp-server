@@ -614,21 +614,25 @@ def _build_elicitation_model(
     fields: Dict[str, Any] = {}
 
     for param in requirements.get("required_parameters", []):
+        extra = {"format": "password"} if param.get("sensitive") else None
         fields[param["key"]] = (
             str,
             Field(
                 title=param.get("name", param["key"]),
                 description=param.get("description", ""),
+                json_schema_extra=extra,
             ),
         )
 
     for param in requirements.get("optional_parameters", []):
+        extra = {"format": "password"} if param.get("sensitive") else None
         fields[param["key"]] = (
             str,
             Field(
                 default="",
                 title=param.get("name", param["key"]),
                 description=param.get("description", ""),
+                json_schema_extra=extra,
             ),
         )
 
