@@ -1,6 +1,6 @@
 """Async HTTP client for Obot API."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import httpx
 
@@ -116,4 +116,75 @@ class ObotClient:
             if e.response.status_code == 404:
                 return None
             raise
+
+    async def list_user_mcp_servers(self) -> List[Dict[str, Any]]:
+        """
+        List the current user's MCP servers.
+
+        Returns:
+            List of user server dictionaries
+        """
+        response = await self.client.get("/api/mcp-servers")
+        response.raise_for_status()
+        data = response.json()
+        return data.get("items", [])
+
+    async def create_user_mcp_server(
+        self, catalog_entry_id: str, url: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a user MCP server from a catalog entry.
+
+        Args:
+            catalog_entry_id: The catalog entry ID to create from
+            url: Optional URL for hostname-constrained remote servers
+
+        Returns:
+            Created server dictionary
+        """
+        body: Dict[str, Any] = {"catalogEntryID": catalog_entry_id}
+        if url:
+            body["manifest"] = {"remoteConfig": {"url": url}}
+
+        response = await self.client.post("/api/mcp-servers", json=body)
+        response.raise_for_status()
+        return response.json()
+
+    async def configure_user_mcp_server(
+        self, server_id: str, config: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """
+        Configure a user MCP server with environment variables and headers.
+
+        Args:
+            server_id: The server ID
+            config: Flat dictionary of key-value pairs for configuration
+
+        Returns:
+            Response dictionary
+        """
+        response = await self.client.post(
+            f"/api/mcp-servers/{server_id}/configure", json=config
+        )
+        response.raise_for_status()
+        return response.json()
+
+    async def update_user_mcp_server_url(
+        self, server_id: str, url: str
+    ) -> Dict[str, Any]:
+        """
+        Update the URL of a user MCP server.
+
+        Args:
+            server_id: The server ID
+            url: The new URL
+
+        Returns:
+            Response dictionary
+        """
+        response = await self.client.post(
+            f"/api/mcp-servers/{server_id}/update-url", json={"url": url}
+        )
+        response.raise_for_status()
+        return response.json()
 

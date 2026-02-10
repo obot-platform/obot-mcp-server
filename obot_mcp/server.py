@@ -1,8 +1,17 @@
 """FastMCP server with tools for Obot MCP server discovery and connection."""
 
+import re
 from typing import Any, Dict, List, Literal, Optional
+from urllib.parse import urlparse
 
-from fastmcp import FastMCP
+import httpx
+from fastmcp import Context, FastMCP
+from fastmcp.server.context import (
+    AcceptedElicitation,
+    CancelledElicitation,
+    DeclinedElicitation,
+)
+from pydantic import Field, create_model
 
 from .client import ObotClient
 from .config import config
@@ -108,7 +117,9 @@ def _extract_server_info(item: Dict[str, Any], item_type: str) -> Dict[str, Any]
         needs_url = _requires_url_configuration(manifest)
         has_required_headers = _has_required_headers(manifest)
 
-        info["requires_configuration"] = has_required_env or needs_url or has_required_headers
+        info["requires_configuration"] = (
+            has_required_env or needs_url or has_required_headers
+        )
         info["needs_url"] = needs_url
     else:  # multi_user_server
         info["configured"] = item.get("configured", False)
@@ -117,7 +128,9 @@ def _extract_server_info(item: Dict[str, Any], item_type: str) -> Dict[str, Any]
         # Construct connect URL using the standard mcp-connect format
         # Multi-user servers use the server ID as the connection identifier
         server_id = item.get("id", "")
-        info["connect_url"] = f"{config.obot_server_url}/mcp-connect/{server_id}" if server_id else ""
+        info["connect_url"] = (
+            f"{config.obot_server_url}/mcp-connect/{server_id}" if server_id else ""
+        )
 
     return info
 
@@ -426,3 +439,390 @@ async def obot_get_mcp_server_connection(server_id: str) -> Dict[str, Any]:
         - message: Human-readable status message
     """
     return await get_mcp_server_connection_impl(server_id)
+
+
+def _extract_configuration_requirements(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Parse a catalog entry manifest and return structured configuration requirements.
+
+    Args:
+        manifest: The catalog entry manifest
+
+    Returns:
+        Dictionary with required_parameters, optional_parameters,
+        url_configuration, and has_oauth_requirement
+    """
+    required_parameters: List[Dict[str, Any]] = []
+    optional_parameters: List[Dict[str, Any]] = []
+
+    # Collect env var names we've already seen (to avoid duplicating template vars)
+    seen_keys: set = set()
+
+    # Process environment variables
+    for env in manifest.get("env", []):
+        # Skip env vars with pre-set static values
+        if env.get("value"):
+            continue
+
+        key = env.get("name", "")
+        seen_keys.add(key)
+        param = {
+            "key": key,
+            "name": env.get("name", key),
+            "description": env.get("description", ""),
+            "sensitive": env.get("sensitive", False),
+            "type": "env",
+            "file": env.get("file", False),
+        }
+
+        if env.get("required", False):
+            required_parameters.append(param)
+        else:
+            optional_parameters.append(param)
+
+    # Process remote config headers
+    remote_config = manifest.get("remoteConfig", {})
+    if manifest.get("runtime") == "remote" and remote_config:
+        for header in remote_config.get("headers", []):
+            # Skip headers with pre-set static values
+            if header.get("value"):
+                continue
+
+            key = header.get("name", "")
+            seen_keys.add(key)
+            param = {
+                "key": key,
+                "name": header.get("name", key),
+                "description": header.get("description", ""),
+                "sensitive": header.get("sensitive", False),
+                "type": "header",
+            }
+            if header.get("prefix"):
+                param["prefix"] = header["prefix"]
+
+            if header.get("required", False):
+                required_parameters.append(param)
+            else:
+                optional_parameters.append(param)
+
+    # Determine URL configuration
+    url_configuration = None
+    if manifest.get("runtime") == "remote" and remote_config:
+        if not remote_config.get("fixedURL"):
+            hostname = remote_config.get("hostname")
+            url_template = remote_config.get("urlTemplate")
+
+            if hostname:
+                url_configuration = {
+                    "type": "hostname",
+                    "hostname": hostname,
+                }
+            elif url_template:
+                url_configuration = {
+                    "type": "template",
+                    "template": url_template,
+                }
+
+                # Extract ${VAR_NAME} references from the template
+                template_vars = re.findall(r"\$\{(\w+)\}", url_template)
+                for var_name in template_vars:
+                    if var_name not in seen_keys:
+                        seen_keys.add(var_name)
+                        required_parameters.append(
+                            {
+                                "key": var_name,
+                                "name": var_name,
+                                "description": f"Value for template variable {var_name}",
+                                "sensitive": False,
+                                "type": "env",
+                                "file": False,
+                            }
+                        )
+
+    # Check for OAuth requirement
+    has_oauth_requirement = bool(remote_config.get("staticOAuthRequired", False))
+
+    return {
+        "required_parameters": required_parameters,
+        "optional_parameters": optional_parameters,
+        "url_configuration": url_configuration,
+        "has_oauth_requirement": has_oauth_requirement,
+    }
+
+
+async def _find_existing_user_server(
+    entry_id: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Find an existing user server created from a specific catalog entry.
+
+    Args:
+        entry_id: The catalog entry ID
+
+    Returns:
+        The user server dictionary if found, None otherwise
+    """
+    servers = await obot_client.list_user_mcp_servers()
+    for server in servers:
+        if server.get("catalogEntryID") == entry_id:
+            return server
+    return None
+
+
+def _validate_hostname(url: str, hostname_pattern: str) -> bool:
+    """
+    Validate that a URL matches a hostname constraint.
+
+    Supports exact match and wildcard patterns like *.example.com.
+
+    Args:
+        url: The URL to validate
+        hostname_pattern: The hostname constraint (exact or *.suffix)
+
+    Returns:
+        True if the URL matches the hostname constraint
+    """
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        if not host:
+            return False
+    except Exception:
+        return False
+
+    if hostname_pattern.startswith("*."):
+        suffix = hostname_pattern[1:]  # e.g., ".example.com"
+        return host.endswith(suffix) or host == hostname_pattern[2:]
+    else:
+        return host == hostname_pattern
+
+
+def _build_elicitation_model(
+    requirements: Dict[str, Any],
+    url_configuration: Optional[Dict[str, Any]],
+) -> type:
+    """
+    Dynamically build a Pydantic model class for ctx.elicit().
+
+    Args:
+        requirements: Output from _extract_configuration_requirements
+        url_configuration: URL configuration dict or None
+
+    Returns:
+        A dynamically-created Pydantic model class
+    """
+    fields: Dict[str, Any] = {}
+
+    for param in requirements.get("required_parameters", []):
+        fields[param["key"]] = (
+            str,
+            Field(
+                title=param.get("name", param["key"]),
+                description=param.get("description", ""),
+            ),
+        )
+
+    for param in requirements.get("optional_parameters", []):
+        fields[param["key"]] = (
+            Optional[str],
+            Field(
+                default="",
+                title=param.get("name", param["key"]),
+                description=param.get("description", ""),
+            ),
+        )
+
+    if url_configuration and url_configuration.get("type") == "hostname":
+        hostname = url_configuration.get("hostname", "")
+        fields["url"] = (
+            str,
+            Field(
+                title="Server URL",
+                description=f"URL for the server (must match hostname: {hostname})",
+            ),
+        )
+
+    return create_model("ConfigurationForm", **fields)
+
+
+@mcp.tool()
+async def obot_configure_catalog_entry(
+    entry_id: str,
+    ctx: Context,
+) -> Dict[str, Any]:
+    """
+    Configure and connect to an MCP server from a catalog entry.
+
+    Reads the catalog entry's configuration requirements, presents a form
+    to the user to collect necessary values (API keys, URLs, etc.), and
+    creates/configures the server -- all in a single tool call.
+
+    Args:
+        entry_id: The catalog entry ID to configure
+
+    Returns:
+        Dictionary with configuration status and connection information
+    """
+    # 1. Fetch catalog entry
+    try:
+        catalog_entry = await obot_client.get_catalog_entry(entry_id)
+    except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
+        return {"status": "error", "message": f"Failed to fetch catalog entry: {e}"}
+
+    if not catalog_entry:
+        return {
+            "status": "not_found",
+            "message": f"No catalog entry found with ID: {entry_id}",
+        }
+
+    manifest = catalog_entry.get("manifest", {})
+    name = manifest.get("name", "Unknown")
+
+    # 2. Reject composite servers
+    if manifest.get("runtime") == "composite":
+        return {
+            "status": "error",
+            "message": "Composite servers cannot be configured through this tool. "
+            "Please use the Obot web UI instead.",
+        }
+
+    # 3. Check OAuth requirement
+    remote_config = manifest.get("remoteConfig", {})
+    if remote_config.get("staticOAuthRequired") and not remote_config.get(
+        "oauthCredentialConfigured"
+    ):
+        return {
+            "status": "error",
+            "message": f"Server '{name}' requires OAuth configuration that must be set up by an administrator first.",
+        }
+
+    # 4. Check for existing configured server
+    try:
+        existing_server = await _find_existing_user_server(entry_id)
+    except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
+        return {
+            "status": "error",
+            "message": f"Failed to check for existing servers: {e}",
+        }
+
+    if existing_server and existing_server.get("configured"):
+        server_id = existing_server.get("id", "")
+        return {
+            "status": "already_configured",
+            "server_id": server_id,
+            "connect_url": f"{config.obot_server_url}/mcp-connect/{server_id}",
+            "message": f"Server '{name}' is already configured and ready to connect.",
+        }
+
+    # 5. Extract configuration requirements
+    requirements = _extract_configuration_requirements(manifest)
+    url_config = requirements.get("url_configuration")
+
+    # 6. If no configuration needed, create server directly
+    has_params = (
+        requirements["required_parameters"] or requirements["optional_parameters"]
+    )
+    needs_url = url_config is not None and url_config.get("type") == "hostname"
+
+    if not has_params and not needs_url:
+        try:
+            if existing_server:
+                server_id = existing_server.get("id", "")
+            else:
+                created = await obot_client.create_user_mcp_server(entry_id)
+                server_id = created.get("id", "")
+            return {
+                "status": "configured",
+                "server_id": server_id,
+                "connect_url": f"{config.obot_server_url}/mcp-connect/{server_id}",
+                "message": f"Server '{name}' created and ready to connect.",
+            }
+        except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
+            return {"status": "error", "message": f"Failed to create server: {e}"}
+
+    # 7. Build elicitation model
+    ConfigModel = _build_elicitation_model(requirements, url_config)
+
+    # 8. Elicit from user
+    result = await ctx.elicit(
+        f"Please provide the configuration for {name}:", ConfigModel
+    )
+
+    # 9. Handle elicitation result
+    if isinstance(result, (DeclinedElicitation, CancelledElicitation)):
+        return {
+            "status": "cancelled",
+            "message": "Configuration was cancelled by the user.",
+        }
+
+    # result is AcceptedElicitation
+    elicited_data = result.data
+
+    # 10. Separate values into config dict and url
+    config_dict: Dict[str, str] = {}
+    url_value: Optional[str] = None
+
+    if isinstance(elicited_data, dict):
+        data_dict = elicited_data
+    else:
+        # Pydantic model - convert to dict
+        data_dict = (
+            elicited_data.model_dump()
+            if hasattr(elicited_data, "model_dump")
+            else dict(elicited_data)
+        )
+
+    for key, value in data_dict.items():
+        if key == "url" and needs_url:
+            url_value = value
+        elif value:  # Only include non-empty values
+            config_dict[key] = value
+
+    # Validate hostname if applicable
+    if url_value and url_config and url_config.get("type") == "hostname":
+        hostname_pattern = url_config.get("hostname", "")
+        if not _validate_hostname(url_value, hostname_pattern):
+            return {
+                "status": "error",
+                "message": f"URL '{url_value}' does not match the required hostname pattern: {hostname_pattern}",
+            }
+
+    # 11. Find or create server
+    try:
+        if existing_server:
+            server_id = existing_server.get("id", "")
+        else:
+            created = await obot_client.create_user_mcp_server(
+                entry_id, url=url_value if needs_url else None
+            )
+            server_id = created.get("id", "")
+    except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
+        return {"status": "error", "message": f"Failed to create server: {e}"}
+
+    # 12. Configure server with collected values
+    if config_dict:
+        try:
+            await obot_client.configure_user_mcp_server(server_id, config_dict)
+        except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
+            return {
+                "status": "error",
+                "message": f"Failed to configure server: {e}",
+            }
+
+    # 13. Update URL if needed for existing server
+    if url_value and existing_server:
+        try:
+            await obot_client.update_user_mcp_server_url(server_id, url_value)
+        except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
+            return {
+                "status": "error",
+                "message": f"Failed to update server URL: {e}",
+            }
+
+    # 14. Return success
+    return {
+        "status": "configured",
+        "server_id": server_id,
+        "connect_url": f"{config.obot_server_url}/mcp-connect/{server_id}",
+        "message": f"Server '{name}' has been configured and is ready to connect.",
+    }
