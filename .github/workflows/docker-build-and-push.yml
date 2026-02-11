@@ -57,7 +57,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          project: ${{ vars.DEPOT_PROJECT_ID }}
+          project: bbqjs4tj1g
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3.7.0
