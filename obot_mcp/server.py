@@ -1,6 +1,8 @@
 """FastMCP server with tools for Obot MCP server discovery and connection."""
 
+import asyncio
 import re
+import uuid
 from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import urlparse
 
@@ -392,15 +394,18 @@ async def get_mcp_server_connection_impl(
                 user_server_id = created.get("id", "")
 
             # Check for OAuth requirement
-            oauth_url = await obot_client.get_mcp_server_oauth_url(user_server_id)
-            if oauth_url:
-                name = manifest.get("name", "Unknown")
-                oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url)
-                if not oauth_success:
-                    return {
-                        "status": "cancelled",
-                        "message": "OAuth authentication was cancelled by the user.",
-                    }
+            try:
+                oauth_url = await obot_client.get_mcp_server_oauth_url(user_server_id)
+                if oauth_url:
+                    name = manifest.get("name", "Unknown")
+                    oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url, user_server_id)
+                    if not oauth_success:
+                        return {
+                            "status": "cancelled",
+                            "message": "OAuth authentication was cancelled by the user.",
+                        }
+            except (httpx.HTTPStatusError, httpx.TimeoutException):
+                pass
 
             # Obot will automatically deploy the server when the user connects
             # Connection URLs use the /mcp-connect/{id} format
@@ -438,23 +443,19 @@ async def get_mcp_server_connection_impl(
                 "message": message,
             }
 
-        # Check for OAuth requirement before connecting
+        # Check for OAuth requirement
         try:
             oauth_url = await obot_client.get_mcp_server_oauth_url(server_id)
             if oauth_url:
-                manifest = server.get("manifest", {})
-                name = manifest.get("name", "Unknown")
-                oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url)
+                name = server.get("manifest", {}).get("name", "Unknown")
+                oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url, server_id)
                 if not oauth_success:
                     return {
                         "status": "cancelled",
                         "message": "OAuth authentication was cancelled by the user.",
                     }
-        except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
-            return {
-                "status": "error",
-                "message": f"Failed to check OAuth requirements: {e}",
-            }
+        except (httpx.HTTPStatusError, httpx.TimeoutException):
+            pass
 
         # Construct connect URL using the standard mcp-connect format
         connect_url = f"{config.obot_server_url}/mcp-connect/{server_id}"
@@ -702,50 +703,59 @@ def _build_elicitation_model(
     return create_model("ConfigurationForm", **fields)
 
 
-async def _handle_oauth_elicitation(ctx: Context, name: str, oauth_url: str) -> bool:
+async def _handle_oauth_elicitation(
+    ctx: Context, name: str, oauth_url: str, server_id: str
+) -> bool:
     """
-    Present OAuth elicitation to user.
+    Present OAuth elicitation to user and wait for token storage.
 
-    Displays the OAuth URL and asks the user to visit it, complete
-    authentication, and then accept to continue.
+    Uses MCP URL mode elicitation to direct the user to the OAuth
+    authorization URL in their browser. After the user accepts,
+    polls the oauth-url endpoint until it returns empty (meaning
+    the token has been stored by Obot).
 
     Args:
         ctx: FastMCP context
         name: Server name for display
         oauth_url: OAuth authorization URL
+        server_id: The MCP server ID, used to poll for token completion
 
     Returns:
         True if OAuth completed (user accepted), False if cancelled/declined
     """
-    # Create empty model (no form fields required)
-    EmptyModel = create_model("OAuthConfirmation")
-
     message = (
-        f"🔐 Authentication Required\n\n"
         f"The MCP server '{name}' requires authentication with an external service.\n\n"
-        f"Please visit this URL in your browser to authenticate:\n{oauth_url}\n\n"
-        f"After completing authentication, return here and accept this prompt to continue."
+        f"Please visit the URL below to authenticate, "
+        f"then return here and accept to continue."
     )
 
-    # Use standard elicit with empty model
-    # Empty models can cause validation errors when returning None/empty data,
-    # so we catch and handle that as acceptance
-    try:
-        result = await ctx.elicit(message, EmptyModel)
-    except Exception as e:
-        # If we get a validation error about None/empty input for the empty model,
-        # treat it as acceptance (user clicked accept but no data to return)
-        error_msg = str(e).lower()
-        if "validation error" in error_msg and ("nonetype" in error_msg or "none" in error_msg):
-            return True
-        # Otherwise, re-raise the error
-        raise
+    result = await ctx.session.elicit_url(
+        message=message,
+        url=oauth_url,
+        elicitation_id=str(uuid.uuid4()),
+        related_request_id=ctx.request_id,
+    )
 
-    # Handle response
-    if isinstance(result, (DeclinedElicitation, CancelledElicitation)):
+    if result.action != "accept":
         return False
 
-    return True  # AcceptedElicitation
+    # Poll until Obot has stored the OAuth token.
+    # The oauth-url endpoint returns a URL when auth is still needed,
+    # and empty/None when the token has been stored.
+    max_attempts = 60
+    poll_interval = 2  # seconds
+    for _ in range(max_attempts):
+        try:
+            url = await obot_client.get_mcp_server_oauth_url(server_id)
+            if not url:
+                return True
+        except Exception:
+            # If the endpoint errors, assume we should keep waiting
+            pass
+        await asyncio.sleep(poll_interval)
+
+    # Timed out waiting for token, but user did accept — proceed anyway
+    return True
 
 
 @mcp.tool()
@@ -820,7 +830,7 @@ async def obot_configure_catalog_entry(
         try:
             oauth_url = await obot_client.get_mcp_server_oauth_url(server_id)
             if oauth_url:
-                oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url)
+                oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url, server_id)
                 if not oauth_success:
                     return {
                         "status": "cancelled",
@@ -860,7 +870,7 @@ async def obot_configure_catalog_entry(
             # Check for OAuth requirement
             oauth_url = await obot_client.get_mcp_server_oauth_url(server_id)
             if oauth_url:
-                oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url)
+                oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url, server_id)
                 if not oauth_success:
                     return {
                         "status": "cancelled",
@@ -938,7 +948,7 @@ async def obot_configure_catalog_entry(
     # Check and handle OAuth requirement
     oauth_url = await obot_client.get_mcp_server_oauth_url(server_id)
     if oauth_url:
-        oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url)
+        oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url, server_id)
         if not oauth_success:
             return {
                 "status": "cancelled",
