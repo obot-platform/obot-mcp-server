@@ -11,6 +11,9 @@ from fastmcp.server.context import (
     CancelledElicitation,
     DeclinedElicitation,
 )
+from mcp import types
+from mcp.shared.message import ServerMessageMetadata
+from mcp.types import ElicitRequestFormParams
 from pydantic import Field, create_model
 
 from .client import ObotClient
@@ -649,6 +652,59 @@ def _build_elicitation_model(
     return create_model("ConfigurationForm", **fields)
 
 
+async def _handle_oauth_elicitation(
+    ctx: Context, name: str, oauth_url: str
+) -> bool:
+    """
+    Present OAuth elicitation to user with metadata (Nanobot pattern).
+
+    Uses MCP form-mode elicitation with metadata to enable specialized OAuth UI
+    in compatible clients.
+
+    Args:
+        ctx: FastMCP context
+        name: Server name for display
+        oauth_url: OAuth authorization URL
+
+    Returns:
+        True if OAuth completed (user accepted), False if cancelled/declined
+    """
+    # Create metadata with OAuth URL (following Nanobot's pattern)
+    metadata = {
+        "ai.nanobot.meta/oauth-url": oauth_url,
+        "ai.nanobot.meta/server-name": name,
+    }
+
+    # Create empty schema (no form fields required)
+    empty_schema = {"type": "object", "properties": {}}
+
+    # Construct elicit request params with metadata
+    params = ElicitRequestFormParams(
+        mode="form",
+        message=(
+            f"🔐 Authentication Required\n\n"
+            f"The MCP server '{name}' requires authentication with an external service.\n\n"
+            f"Please visit this URL in your browser to authenticate:\n{oauth_url}\n\n"
+            f"After completing authentication, return here and accept this prompt to continue."
+        ),
+        requestedSchema=empty_schema,
+        _meta=metadata,  # Metadata enables specialized OAuth UI
+    )
+
+    # Send elicit request via low-level session API to include metadata
+    result = await ctx.session.send_request(
+        types.ServerRequest(types.ElicitRequest(params=params)),
+        types.ElicitResult,
+        metadata=ServerMessageMetadata(related_request_id=ctx.request_id),
+    )
+
+    # Handle response
+    if result.action == "decline" or result.action == "cancel":
+        return False
+
+    return True  # action == "accept"
+
+
 @mcp.tool()
 async def obot_configure_catalog_entry(
     entry_id: str,
@@ -657,9 +713,14 @@ async def obot_configure_catalog_entry(
     """
     Configure and connect to an MCP server from a catalog entry.
 
-    Reads the catalog entry's configuration requirements, presents a form
-    to the user to collect necessary values (API keys, URLs, etc.), and
-    creates/configures the server -- all in a single tool call.
+    Reads the catalog entry's configuration requirements, handles OAuth
+    authentication if needed, presents a form to the user to collect
+    necessary values (API keys, URLs, etc.), and creates/configures
+    the server -- all in a single tool call.
+
+    If the server requires OAuth authentication, the user will be
+    prompted to visit an authentication URL in their browser before
+    continuing with configuration.
 
     Args:
         entry_id: The catalog entry ID to configure
@@ -735,6 +796,17 @@ async def obot_configure_catalog_entry(
             else:
                 created = await obot_client.create_user_mcp_server(entry_id)
                 server_id = created.get("id", "")
+
+            # Check for OAuth requirement
+            oauth_url = await obot_client.get_mcp_server_oauth_url(server_id)
+            if oauth_url:
+                oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url)
+                if not oauth_success:
+                    return {
+                        "status": "cancelled",
+                        "message": "OAuth authentication was cancelled by the user.",
+                    }
+
             return {
                 "status": "configured",
                 "server_id": server_id,
@@ -802,6 +874,16 @@ async def obot_configure_catalog_entry(
             server_id = created.get("id", "")
     except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
         return {"status": "error", "message": f"Failed to create server: {e}"}
+
+    # Check and handle OAuth requirement
+    oauth_url = await obot_client.get_mcp_server_oauth_url(server_id)
+    if oauth_url:
+        oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url)
+        if not oauth_success:
+            return {
+                "status": "cancelled",
+                "message": "OAuth authentication was cancelled by the user.",
+            }
 
     # 12. Configure server with collected values
     if config_dict:

@@ -345,9 +345,13 @@ class TestFindExistingUserServer:
 
 def _make_ctx(elicit_result=None):
     """Create a mock Context for testing."""
-    ctx = AsyncMock(spec=["elicit"])
+    ctx = AsyncMock(spec=["elicit", "session", "request_id"])
     if elicit_result is not None:
         ctx.elicit = AsyncMock(return_value=elicit_result)
+    # Add session mock for OAuth elicitations
+    ctx.session = MagicMock()
+    ctx.session.send_request = AsyncMock()
+    ctx.request_id = "test-request-id"
     return ctx
 
 
@@ -408,6 +412,7 @@ class TestConfigureCatalogEntry:
             patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=entry),
             patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[]),
             patch.object(obot_client, "create_user_mcp_server", new_callable=AsyncMock, return_value=created),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=None),
         ):
             result = await obot_configure_catalog_entry(entry_id="entry-1", ctx=ctx)
         assert result["status"] == "configured"
@@ -434,6 +439,7 @@ class TestConfigureCatalogEntry:
             patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[]),
             patch.object(obot_client, "create_user_mcp_server", new_callable=AsyncMock, return_value=created),
             patch.object(obot_client, "configure_user_mcp_server", new_callable=AsyncMock, return_value={}) as mock_configure,
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=None),
         ):
             result = await obot_configure_catalog_entry(entry_id="entry-1", ctx=ctx)
 
@@ -498,6 +504,7 @@ class TestConfigureCatalogEntry:
             patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=entry),
             patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[]),
             patch.object(obot_client, "create_user_mcp_server", new_callable=AsyncMock, return_value=created) as mock_create,
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=None),
         ):
             result = await obot_configure_catalog_entry(entry_id="entry-1", ctx=ctx)
 
@@ -577,6 +584,7 @@ class TestConfigureCatalogEntry:
             patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[existing]),
             patch.object(obot_client, "create_user_mcp_server", new_callable=AsyncMock) as mock_create,
             patch.object(obot_client, "configure_user_mcp_server", new_callable=AsyncMock, return_value={}),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=None),
         ):
             result = await obot_configure_catalog_entry(entry_id="entry-1", ctx=ctx)
 
@@ -603,6 +611,7 @@ class TestConfigureCatalogEntry:
             patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=entry),
             patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[existing]),
             patch.object(obot_client, "update_user_mcp_server_url", new_callable=AsyncMock, return_value={}) as mock_update_url,
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=None),
         ):
             result = await obot_configure_catalog_entry(entry_id="entry-1", ctx=ctx)
 
@@ -703,3 +712,141 @@ class TestObotClientNewMethods:
             json={"url": "https://example.com"},
             headers={},
         )
+
+    @pytest.mark.asyncio
+    async def test_get_mcp_server_oauth_url_required(self):
+        """Test OAuth URL retrieval when OAuth is required."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"oauthURL": "https://oauth.example.com/authorize"}
+        mock_response.raise_for_status = MagicMock()
+
+        client, mock_http = self._make_client_with_mock()
+        mock_http.get = AsyncMock(return_value=mock_response)
+        result = await client.get_mcp_server_oauth_url("s1")
+
+        assert result == "https://oauth.example.com/authorize"
+        mock_http.get.assert_called_once_with(
+            "/api/mcp-servers/s1/oauth-url",
+            headers={},
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_mcp_server_oauth_url_not_required(self):
+        """Test OAuth URL retrieval when OAuth is not required."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"oauthURL": ""}
+        mock_response.raise_for_status = MagicMock()
+
+        client, mock_http = self._make_client_with_mock()
+        mock_http.get = AsyncMock(return_value=mock_response)
+        result = await client.get_mcp_server_oauth_url("s1")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_mcp_server_oauth_url_server_not_found(self):
+        """Test OAuth URL retrieval when server doesn't exist yet."""
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        error = httpx.HTTPStatusError("Not found", request=MagicMock(), response=mock_response)
+
+        client, mock_http = self._make_client_with_mock()
+        mock_http.get = AsyncMock(side_effect=error)
+        result = await client.get_mcp_server_oauth_url("s1")
+
+        assert result is None
+
+
+# --- Test OAuth Configuration Flow ---
+
+
+class TestOAuthConfigurationFlow:
+    @pytest.mark.asyncio
+    async def test_configure_with_oauth_required_accepted(self):
+        """Test configuration flow with OAuth requirement - user accepts."""
+        entry = {"manifest": {"name": "OAuth Server", "runtime": "uvx", "env": []}}
+        created = {"id": "oauth-1"}
+        oauth_url = "https://oauth.example.com/authorize"
+
+        # Mock OAuth acceptance - the OAuth elicitation returns accept
+        # We need to mock the session.send_request call
+        ctx = _make_ctx()
+
+        # Mock the session.send_request to return an accepted result
+        mock_elicit_result = MagicMock()
+        mock_elicit_result.action = "accept"
+        ctx.session.send_request = AsyncMock(return_value=mock_elicit_result)
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=entry),
+            patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[]),
+            patch.object(obot_client, "create_user_mcp_server", new_callable=AsyncMock, return_value=created),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=oauth_url),
+        ):
+            result = await obot_configure_catalog_entry(entry_id="entry-1", ctx=ctx)
+
+        assert result["status"] == "configured"
+        assert result["server_id"] == "oauth-1"
+        # Verify OAuth elicitation was called
+        ctx.session.send_request.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_configure_with_oauth_required_declined(self):
+        """Test configuration flow with OAuth requirement - user declines."""
+        entry = {"manifest": {"name": "OAuth Server", "runtime": "uvx", "env": []}}
+        created = {"id": "oauth-1"}
+        oauth_url = "https://oauth.example.com/authorize"
+
+        ctx = _make_ctx()
+
+        # Mock the session.send_request to return a declined result
+        mock_elicit_result = MagicMock()
+        mock_elicit_result.action = "decline"
+        ctx.session.send_request = AsyncMock(return_value=mock_elicit_result)
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=entry),
+            patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[]),
+            patch.object(obot_client, "create_user_mcp_server", new_callable=AsyncMock, return_value=created),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=oauth_url),
+        ):
+            result = await obot_configure_catalog_entry(entry_id="entry-1", ctx=ctx)
+
+        assert result["status"] == "cancelled"
+        assert "OAuth authentication was cancelled" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_configure_with_oauth_and_config_required(self):
+        """Test configuration flow with both OAuth and config parameters."""
+        entry = {
+            "manifest": {
+                "name": "OAuth API Server",
+                "runtime": "uvx",
+                "env": [{"name": "API_KEY", "description": "Key", "required": True}],
+            }
+        }
+        created = {"id": "oauth-2"}
+        oauth_url = "https://oauth.example.com/authorize"
+        elicit_data = {"API_KEY": "my-secret-key"}
+        elicit_result = AcceptedElicitation(data=elicit_data)
+        ctx = _make_ctx(elicit_result)
+
+        # Mock OAuth acceptance
+        mock_oauth_result = MagicMock()
+        mock_oauth_result.action = "accept"
+        ctx.session.send_request = AsyncMock(return_value=mock_oauth_result)
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=entry),
+            patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[]),
+            patch.object(obot_client, "create_user_mcp_server", new_callable=AsyncMock, return_value=created),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=oauth_url),
+            patch.object(obot_client, "configure_user_mcp_server", new_callable=AsyncMock, return_value={}) as mock_configure,
+        ):
+            result = await obot_configure_catalog_entry(entry_id="entry-1", ctx=ctx)
+
+        assert result["status"] == "configured"
+        assert result["server_id"] == "oauth-2"
+        # Verify both OAuth and configuration happened
+        ctx.session.send_request.assert_called_once()
+        mock_configure.assert_called_once_with("oauth-2", {"API_KEY": "my-secret-key"})

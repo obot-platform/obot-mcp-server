@@ -211,3 +211,27 @@ class ObotClient:
         response.raise_for_status()
         return response.json()
 
+    async def get_mcp_server_oauth_url(self, server_id: str) -> Optional[str]:
+        """
+        Get the OAuth URL for a user MCP server if authentication is required.
+
+        Args:
+            server_id: The user MCP server ID
+
+        Returns:
+            OAuth authorization URL if authentication needed, None otherwise
+        """
+        try:
+            response = await self.client.get(
+                f"/api/mcp-servers/{server_id}/oauth-url",
+                headers=self._get_auth_headers(),
+            )
+            response.raise_for_status()
+            data = response.json()
+            oauth_url = data.get("oauthURL", "")
+            return oauth_url if oauth_url else None
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
+            raise
+
