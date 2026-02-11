@@ -702,9 +702,7 @@ def _build_elicitation_model(
     return create_model("ConfigurationForm", **fields)
 
 
-async def _handle_oauth_elicitation(
-    ctx: Context, name: str, oauth_url: str
-) -> bool:
+async def _handle_oauth_elicitation(ctx: Context, name: str, oauth_url: str) -> bool:
     """
     Present OAuth elicitation to user.
 
@@ -730,7 +728,18 @@ async def _handle_oauth_elicitation(
     )
 
     # Use standard elicit with empty model
-    result = await ctx.elicit(message, EmptyModel)
+    # Empty models can cause validation errors when returning None/empty data,
+    # so we catch and handle that as acceptance
+    try:
+        result = await ctx.elicit(message, EmptyModel)
+    except Exception as e:
+        # If we get a validation error about None/empty input for the empty model,
+        # treat it as acceptance (user clicked accept but no data to return)
+        error_msg = str(e).lower()
+        if "validation error" in error_msg and ("nonetype" in error_msg or "none" in error_msg):
+            return True
+        # Otherwise, re-raise the error
+        raise
 
     # Handle response
     if isinstance(result, (DeclinedElicitation, CancelledElicitation)):
@@ -787,7 +796,7 @@ async def obot_configure_catalog_entry(
 
     # 3. Check OAuth requirement
     remote_config = manifest.get("remoteConfig", {})
-    if remote_config.get("staticOAuthRequired") and not remote_config.get(
+    if remote_config.get("staticOAuthRequired") and not catalog_entry.get(
         "oauthCredentialConfigured"
     ):
         return {
