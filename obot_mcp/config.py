@@ -7,7 +7,7 @@ class Config:
     """Configuration settings for the Obot MCP server."""
 
     def __init__(self):
-        self.obot_server_url = os.getenv("OBOT_SERVER_URL", "http://localhost:8080")
+        self.obot_server_url = os.getenv("OBOT_URL", "http://localhost:8080")
 
         # Ensure URL doesn't end with slash
         if self.obot_server_url.endswith("/"):
