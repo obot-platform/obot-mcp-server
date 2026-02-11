@@ -12,6 +12,7 @@ from obot_mcp.server import (
     _build_elicitation_model,
     _find_existing_user_server,
     obot_configure_catalog_entry as obot_configure_catalog_entry_tool,
+    get_mcp_server_connection_impl,
     obot_client,
 )
 from obot_mcp.client import ObotClient
@@ -345,13 +346,9 @@ class TestFindExistingUserServer:
 
 def _make_ctx(elicit_result=None):
     """Create a mock Context for testing."""
-    ctx = AsyncMock(spec=["elicit", "session", "request_id"])
+    ctx = AsyncMock(spec=["elicit"])
     if elicit_result is not None:
         ctx.elicit = AsyncMock(return_value=elicit_result)
-    # Add session mock for OAuth elicitations
-    ctx.session = MagicMock()
-    ctx.session.send_request = AsyncMock()
-    ctx.request_id = "test-request-id"
     return ctx
 
 
@@ -398,10 +395,55 @@ class TestConfigureCatalogEntry:
         with (
             patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=entry),
             patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[existing]),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=None),
         ):
             result = await obot_configure_catalog_entry(entry_id="entry-1", ctx=ctx)
         assert result["status"] == "already_configured"
         assert result["server_id"] == "s1"
+
+    @pytest.mark.asyncio
+    async def test_already_configured_with_oauth(self):
+        """Test that OAuth is checked even for already configured servers."""
+        entry = {"manifest": {"name": "OAuth Server", "runtime": "uvx", "env": []}}
+        existing = {"id": "s1", "catalogEntryID": "entry-1", "configured": True}
+        oauth_url = "https://oauth.example.com/authorize"
+
+        # Mock OAuth acceptance
+        oauth_accepted = AcceptedElicitation(data={})
+        ctx = _make_ctx(oauth_accepted)
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=entry),
+            patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[existing]),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=oauth_url),
+        ):
+            result = await obot_configure_catalog_entry(entry_id="entry-1", ctx=ctx)
+
+        assert result["status"] == "already_configured"
+        assert result["server_id"] == "s1"
+        # Verify OAuth elicitation was called
+        ctx.elicit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_already_configured_with_oauth_declined(self):
+        """Test that OAuth decline is handled for already configured servers."""
+        entry = {"manifest": {"name": "OAuth Server", "runtime": "uvx", "env": []}}
+        existing = {"id": "s1", "catalogEntryID": "entry-1", "configured": True}
+        oauth_url = "https://oauth.example.com/authorize"
+
+        # Mock OAuth decline
+        oauth_declined = DeclinedElicitation()
+        ctx = _make_ctx(oauth_declined)
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=entry),
+            patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[existing]),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=oauth_url),
+        ):
+            result = await obot_configure_catalog_entry(entry_id="entry-1", ctx=ctx)
+
+        assert result["status"] == "cancelled"
+        assert "OAuth authentication was cancelled" in result["message"]
 
     @pytest.mark.asyncio
     async def test_no_config_needed_auto_create(self):
@@ -768,14 +810,9 @@ class TestOAuthConfigurationFlow:
         created = {"id": "oauth-1"}
         oauth_url = "https://oauth.example.com/authorize"
 
-        # Mock OAuth acceptance - the OAuth elicitation returns accept
-        # We need to mock the session.send_request call
-        ctx = _make_ctx()
-
-        # Mock the session.send_request to return an accepted result
-        mock_elicit_result = MagicMock()
-        mock_elicit_result.action = "accept"
-        ctx.session.send_request = AsyncMock(return_value=mock_elicit_result)
+        # Mock OAuth acceptance
+        oauth_accepted = AcceptedElicitation(data={})
+        ctx = _make_ctx(oauth_accepted)
 
         with (
             patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=entry),
@@ -788,7 +825,7 @@ class TestOAuthConfigurationFlow:
         assert result["status"] == "configured"
         assert result["server_id"] == "oauth-1"
         # Verify OAuth elicitation was called
-        ctx.session.send_request.assert_called_once()
+        ctx.elicit.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_configure_with_oauth_required_declined(self):
@@ -797,12 +834,9 @@ class TestOAuthConfigurationFlow:
         created = {"id": "oauth-1"}
         oauth_url = "https://oauth.example.com/authorize"
 
-        ctx = _make_ctx()
-
-        # Mock the session.send_request to return a declined result
-        mock_elicit_result = MagicMock()
-        mock_elicit_result.action = "decline"
-        ctx.session.send_request = AsyncMock(return_value=mock_elicit_result)
+        # Mock OAuth decline
+        oauth_declined = DeclinedElicitation()
+        ctx = _make_ctx(oauth_declined)
 
         with (
             patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=entry),
@@ -827,14 +861,14 @@ class TestOAuthConfigurationFlow:
         }
         created = {"id": "oauth-2"}
         oauth_url = "https://oauth.example.com/authorize"
-        elicit_data = {"API_KEY": "my-secret-key"}
-        elicit_result = AcceptedElicitation(data=elicit_data)
-        ctx = _make_ctx(elicit_result)
 
-        # Mock OAuth acceptance
-        mock_oauth_result = MagicMock()
-        mock_oauth_result.action = "accept"
-        ctx.session.send_request = AsyncMock(return_value=mock_oauth_result)
+        # Create context - elicit will be called twice: once for config, once for OAuth
+        ctx = AsyncMock()
+        # First call returns config data, second call returns OAuth acceptance
+        ctx.elicit = AsyncMock(side_effect=[
+            AcceptedElicitation(data={"API_KEY": "my-secret-key"}),  # Config form
+            AcceptedElicitation(data={}),  # OAuth confirmation
+        ])
 
         with (
             patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=entry),
@@ -847,6 +881,268 @@ class TestOAuthConfigurationFlow:
 
         assert result["status"] == "configured"
         assert result["server_id"] == "oauth-2"
-        # Verify both OAuth and configuration happened
-        ctx.session.send_request.assert_called_once()
+        # Verify both elicitations happened (config + OAuth)
+        assert ctx.elicit.call_count == 2
         mock_configure.assert_called_once_with("oauth-2", {"API_KEY": "my-secret-key"})
+
+
+# --- Test get_mcp_server_connection_impl with OAuth ---
+
+
+class TestGetMcpServerConnection:
+    @pytest.mark.asyncio
+    async def test_catalog_entry_without_oauth(self):
+        """Test catalog entry connection without OAuth requirement."""
+        catalog_entry = {
+            "manifest": {
+                "name": "Simple Server",
+                "runtime": "uvx",
+                "env": [],
+            }
+        }
+        created_server = {"id": "user-server-1"}
+        ctx = _make_ctx()
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=catalog_entry),
+            patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[]),
+            patch.object(obot_client, "create_user_mcp_server", new_callable=AsyncMock, return_value=created_server),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=None),
+            patch.object(obot_client, "get_multi_user_server", new_callable=AsyncMock, return_value=None),
+        ):
+            result = await get_mcp_server_connection_impl("catalog-1", ctx)
+
+        assert result["status"] == "available"
+        assert result["connect_url"] == "http://localhost:8080/mcp-connect/user-server-1"
+
+    @pytest.mark.asyncio
+    async def test_catalog_entry_with_oauth_accepted(self):
+        """Test catalog entry with OAuth - user accepts."""
+        catalog_entry = {
+            "manifest": {
+                "name": "OAuth Server",
+                "runtime": "uvx",
+                "env": [],
+            }
+        }
+        created_server = {"id": "user-server-2"}
+        oauth_url = "https://oauth.example.com/authorize"
+
+        # Mock OAuth acceptance
+        oauth_accepted = AcceptedElicitation(data={})
+        ctx = _make_ctx(oauth_accepted)
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=catalog_entry),
+            patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[]),
+            patch.object(obot_client, "create_user_mcp_server", new_callable=AsyncMock, return_value=created_server),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=oauth_url),
+            patch.object(obot_client, "get_multi_user_server", new_callable=AsyncMock, return_value=None),
+        ):
+            result = await get_mcp_server_connection_impl("catalog-1", ctx)
+
+        assert result["status"] == "available"
+        assert result["connect_url"] == "http://localhost:8080/mcp-connect/user-server-2"
+        ctx.elicit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_catalog_entry_with_oauth_declined(self):
+        """Test catalog entry with OAuth - user declines."""
+        catalog_entry = {
+            "manifest": {
+                "name": "OAuth Server",
+                "runtime": "uvx",
+                "env": [],
+            }
+        }
+        created_server = {"id": "user-server-3"}
+        oauth_url = "https://oauth.example.com/authorize"
+
+        # Mock OAuth decline
+        oauth_declined = DeclinedElicitation()
+        ctx = _make_ctx(oauth_declined)
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=catalog_entry),
+            patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[]),
+            patch.object(obot_client, "create_user_mcp_server", new_callable=AsyncMock, return_value=created_server),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=oauth_url),
+            patch.object(obot_client, "get_multi_user_server", new_callable=AsyncMock, return_value=None),
+        ):
+            result = await get_mcp_server_connection_impl("catalog-1", ctx)
+
+        assert result["status"] == "cancelled"
+        assert "OAuth authentication was cancelled" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_catalog_entry_with_existing_server_and_oauth(self):
+        """Test catalog entry with existing user server and OAuth requirement."""
+        catalog_entry = {
+            "manifest": {
+                "name": "OAuth Server",
+                "runtime": "uvx",
+                "env": [],
+            }
+        }
+        existing_server = {"id": "existing-server-1", "catalogEntryID": "catalog-1"}
+        oauth_url = "https://oauth.example.com/authorize"
+
+        # Mock OAuth acceptance
+        oauth_accepted = AcceptedElicitation(data={})
+        ctx = _make_ctx(oauth_accepted)
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=catalog_entry),
+            patch.object(obot_client, "list_user_mcp_servers", new_callable=AsyncMock, return_value=[existing_server]),
+            patch.object(obot_client, "create_user_mcp_server", new_callable=AsyncMock) as mock_create,
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=oauth_url),
+            patch.object(obot_client, "get_multi_user_server", new_callable=AsyncMock, return_value=None),
+        ):
+            result = await get_mcp_server_connection_impl("catalog-1", ctx)
+
+        assert result["status"] == "available"
+        assert result["connect_url"] == "http://localhost:8080/mcp-connect/existing-server-1"
+        # Should not create new server if one exists
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_multi_user_server_without_oauth(self):
+        """Test multi-user server connection without OAuth requirement."""
+        multi_user_server = {
+            "id": "multi-server-1",
+            "configured": True,
+            "needsURL": False,
+            "manifest": {
+                "name": "Multi Server",
+                "runtime": "containerized",
+            }
+        }
+        ctx = _make_ctx()
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=None),
+            patch.object(obot_client, "get_multi_user_server", new_callable=AsyncMock, return_value=multi_user_server),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=None),
+        ):
+            result = await get_mcp_server_connection_impl("multi-server-1", ctx)
+
+        assert result["status"] == "available"
+        assert result["connect_url"] == "http://localhost:8080/mcp-connect/multi-server-1"
+
+    @pytest.mark.asyncio
+    async def test_multi_user_server_with_oauth_accepted(self):
+        """Test multi-user server with OAuth - user accepts."""
+        multi_user_server = {
+            "id": "multi-server-2",
+            "configured": True,
+            "needsURL": False,
+            "manifest": {
+                "name": "OAuth Multi Server",
+                "runtime": "containerized",
+            }
+        }
+        oauth_url = "https://oauth.example.com/authorize"
+
+        # Mock OAuth acceptance
+        oauth_accepted = AcceptedElicitation(data={})
+        ctx = _make_ctx(oauth_accepted)
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=None),
+            patch.object(obot_client, "get_multi_user_server", new_callable=AsyncMock, return_value=multi_user_server),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=oauth_url),
+        ):
+            result = await get_mcp_server_connection_impl("multi-server-2", ctx)
+
+        assert result["status"] == "available"
+        assert result["connect_url"] == "http://localhost:8080/mcp-connect/multi-server-2"
+        ctx.elicit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_multi_user_server_with_oauth_declined(self):
+        """Test multi-user server with OAuth - user declines."""
+        multi_user_server = {
+            "id": "multi-server-3",
+            "configured": True,
+            "needsURL": False,
+            "manifest": {
+                "name": "OAuth Multi Server",
+                "runtime": "containerized",
+            }
+        }
+        oauth_url = "https://oauth.example.com/authorize"
+
+        # Mock OAuth decline
+        oauth_declined = DeclinedElicitation()
+        ctx = _make_ctx(oauth_declined)
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=None),
+            patch.object(obot_client, "get_multi_user_server", new_callable=AsyncMock, return_value=multi_user_server),
+            patch.object(obot_client, "get_mcp_server_oauth_url", new_callable=AsyncMock, return_value=oauth_url),
+        ):
+            result = await get_mcp_server_connection_impl("multi-server-3", ctx)
+
+        assert result["status"] == "cancelled"
+        assert "OAuth authentication was cancelled" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_server_not_found(self):
+        """Test when server is not found."""
+        ctx = _make_ctx()
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=None),
+            patch.object(obot_client, "get_multi_user_server", new_callable=AsyncMock, return_value=None),
+        ):
+            result = await get_mcp_server_connection_impl("nonexistent", ctx)
+
+        assert result["status"] == "not_found"
+        assert "No server or catalog entry found" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_catalog_entry_requires_configuration(self):
+        """Test catalog entry that requires configuration."""
+        catalog_entry = {
+            "manifest": {
+                "name": "Config Server",
+                "runtime": "uvx",
+                "env": [
+                    {"name": "API_KEY", "description": "API Key", "required": True}
+                ],
+            }
+        }
+        ctx = _make_ctx()
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=catalog_entry),
+            patch.object(obot_client, "get_multi_user_server", new_callable=AsyncMock, return_value=None),
+        ):
+            result = await get_mcp_server_connection_impl("catalog-1", ctx)
+
+        assert result["status"] == "requires_configuration"
+        assert "configure_url" in result
+        assert "environment variables" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_multi_user_server_needs_configuration(self):
+        """Test multi-user server that needs configuration."""
+        multi_user_server = {
+            "id": "multi-server-4",
+            "configured": False,
+            "needsURL": False,
+            "manifest": {
+                "name": "Unconfigured Server",
+                "runtime": "uvx",
+            }
+        }
+        ctx = _make_ctx()
+
+        with (
+            patch.object(obot_client, "get_catalog_entry", new_callable=AsyncMock, return_value=None),
+            patch.object(obot_client, "get_multi_user_server", new_callable=AsyncMock, return_value=multi_user_server),
+        ):
+            result = await get_mcp_server_connection_impl("multi-server-4", ctx)
+
+        assert result["status"] == "requires_configuration"
+        assert "configure_url" in result
