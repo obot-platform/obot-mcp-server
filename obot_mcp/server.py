@@ -13,6 +13,7 @@ from fastmcp.server.context import (
     CancelledElicitation,
     DeclinedElicitation,
 )
+from mcp import types as mcp_types
 from pydantic import Field, create_model
 
 from .client import ObotClient
@@ -729,11 +730,26 @@ async def _handle_oauth_elicitation(
         f"then return here and accept to continue."
     )
 
-    result = await ctx.session.elicit_url(
+    # Build the URL mode elicitation params with _meta containing the OAuth URL.
+    # Nanobot's ElicitRequest struct only preserves message, requestedSchema, and _meta
+    # when forwarding elicitations to the UI — the standard MCP "mode" and "url" fields
+    # are dropped. Including the URL in _meta with the "ai.nanobot.meta/oauth-url" key
+    # ensures the UI can detect and display the OAuth URL correctly.
+    params = mcp_types.ElicitRequestURLParams(
         message=message,
         url=oauth_url,
-        elicitation_id=str(uuid.uuid4()),
-        related_request_id=ctx.request_id,
+        elicitationId=str(uuid.uuid4()),
+    )
+    params.meta = mcp_types.RequestParams.Meta(**{
+        "ai.nanobot.meta/oauth-url": oauth_url,
+        "ai.nanobot.meta/server-name": name,
+    })
+
+    result = await ctx.session.send_request(
+        mcp_types.ServerRequest(
+            mcp_types.ElicitRequest(params=params),
+        ),
+        mcp_types.ElicitResult,
     )
 
     if result.action != "accept":

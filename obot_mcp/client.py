@@ -1,11 +1,14 @@
 """Async HTTP client for Obot API."""
 
+import logging
 from typing import Any, Dict, List, Optional
 
 import httpx
 from fastmcp.server.dependencies import get_http_request
 
 from .config import config
+
+logger = logging.getLogger(__name__)
 
 
 class ObotClient:
@@ -27,9 +30,11 @@ class ObotClient:
             request = get_http_request()
             auth = request.headers.get("authorization")
             if auth:
+                logger.debug("Authorization header: %s", auth)
                 return {"Authorization": auth}
         except (RuntimeError, LookupError):
             pass
+        logger.debug("No Authorization header found")
         return {}
 
     @property

@@ -352,7 +352,7 @@ def _make_ctx(elicit_result=None, elicit_url_result=None):
         ctx.elicit = AsyncMock(return_value=elicit_result)
     if elicit_url_result is not None:
         ctx.session = AsyncMock()
-        ctx.session.elicit_url = AsyncMock(return_value=elicit_url_result)
+        ctx.session.send_request = AsyncMock(return_value=elicit_url_result)
     ctx.request_id = "test-request-id"
     return ctx
 
@@ -427,7 +427,7 @@ class TestConfigureCatalogEntry:
         assert result["status"] == "already_configured"
         assert result["server_id"] == "s1"
         # Verify OAuth elicitation was called
-        ctx.session.elicit_url.assert_called_once()
+        ctx.session.send_request.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_already_configured_with_oauth_declined(self):
@@ -829,7 +829,7 @@ class TestOAuthConfigurationFlow:
         assert result["status"] == "configured"
         assert result["server_id"] == "oauth-1"
         # Verify OAuth elicitation was called
-        ctx.session.elicit_url.assert_called_once()
+        ctx.session.send_request.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_configure_with_oauth_required_declined(self):
@@ -885,7 +885,7 @@ class TestOAuthConfigurationFlow:
         assert result["server_id"] == "oauth-2"
         # Verify both elicitations happened (config form + OAuth URL)
         ctx.elicit.assert_called_once()
-        ctx.session.elicit_url.assert_called_once()
+        ctx.session.send_request.assert_called_once()
         mock_configure.assert_called_once_with("oauth-2", {"API_KEY": "my-secret-key"})
 
 
@@ -945,7 +945,7 @@ class TestGetMcpServerConnection:
 
         assert result["status"] == "available"
         assert result["connect_url"] == "http://localhost:8080/mcp-connect/user-server-2"
-        ctx.session.elicit_url.assert_called_once()
+        ctx.session.send_request.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_catalog_entry_with_oauth_declined(self):
@@ -1003,7 +1003,7 @@ class TestGetMcpServerConnection:
         assert result["connect_url"] == "http://localhost:8080/mcp-connect/existing-server-1"
         # Should not create new server if one exists
         mock_create.assert_not_called()
-        ctx.session.elicit_url.assert_called_once()
+        ctx.session.send_request.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_multi_user_server_without_oauth(self):
@@ -1055,7 +1055,7 @@ class TestGetMcpServerConnection:
 
         assert result["status"] == "available"
         assert result["connect_url"] == "http://localhost:8080/mcp-connect/multi-server-2"
-        ctx.session.elicit_url.assert_called_once()
+        ctx.session.send_request.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_multi_user_server_with_oauth_declined(self):
