@@ -801,16 +801,6 @@ async def _handle_catalog_entry_connection(
     except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
         return {"status": "error", "message": f"Failed to create server: {e}"}
 
-    # Check and handle OAuth requirement
-    oauth_url = await obot_client.get_mcp_server_oauth_url(user_server_id)
-    if oauth_url:
-        oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url, user_server_id)
-        if not oauth_success:
-            return {
-                "status": "cancelled",
-                "message": "OAuth authentication was cancelled by the user.",
-            }
-
     # 11. Configure server with collected values
     if config_dict:
         try:
@@ -819,6 +809,16 @@ async def _handle_catalog_entry_connection(
             return {
                 "status": "error",
                 "message": f"Failed to configure server: {e}",
+            }
+
+    # Check and handle OAuth requirement
+    oauth_url = await obot_client.get_mcp_server_oauth_url(user_server_id)
+    if oauth_url:
+        oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url, user_server_id)
+        if not oauth_success:
+            return {
+                "status": "cancelled",
+                "message": "OAuth authentication was cancelled by the user.",
             }
 
     # 12. Launch validation
