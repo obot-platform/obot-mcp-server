@@ -1,27 +1,31 @@
 """Tests for obot_connect_to_mcp_server tool and related functions."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
-from fastmcp.server.context import (
+import pytest
+from fastmcp.server.elicitation import (
     AcceptedElicitation,
-    DeclinedElicitation,
     CancelledElicitation,
+    DeclinedElicitation,
 )
 from mcp.types import ElicitResult
 
+from obot_mcp.client import ObotClient
 from obot_mcp.server import (
+    _build_elicitation_model,
     _extract_configuration_requirements,
+    _find_existing_user_server,
     _search_items,
     _validate_hostname,
-    _build_elicitation_model,
-    _find_existing_user_server,
-    mcp as server_mcp,
-    obot_connect_to_mcp_server as obot_connect_to_mcp_server_tool,
     obot_client,
 )
-from obot_mcp.client import ObotClient
+from obot_mcp.server import (
+    mcp as server_mcp,
+)
+from obot_mcp.server import (
+    obot_connect_to_mcp_server as obot_connect_to_mcp_server_tool,
+)
 
 # The @mcp.tool() decorator wraps the function into a FunctionTool object.
 # Access the underlying async function via .fn for direct testing.
@@ -380,7 +384,9 @@ class TestSearchItems:
         assert len(results) == 1
 
     def test_matches_short_description(self):
-        items = [self._make_item(name="Server", short_description="Access GitHub repos")]
+        items = [
+            self._make_item(name="Server", short_description="Access GitHub repos")
+        ]
         results = _search_items(items, "github")
         assert len(results) == 1
 
@@ -421,7 +427,9 @@ class TestSearchItems:
         """Short description matches should come before description matches."""
         items = [
             self._make_item(name="A", short_description="x", description="GitHub tool"),
-            self._make_item(name="B", short_description="GitHub access", description="y"),
+            self._make_item(
+                name="B", short_description="GitHub access", description="y"
+            ),
         ]
         results = _search_items(items, "github")
         assert len(results) == 2
@@ -430,9 +438,15 @@ class TestSearchItems:
 
     def test_ordering_all_three_tiers(self):
         """Results should be ordered: title > short description > description."""
-        desc_item = self._make_item(name="C", short_description="x", description="GitHub docs")
-        short_desc_item = self._make_item(name="B", short_description="GitHub API", description="y")
-        title_item = self._make_item(name="GitHub Server", short_description="x", description="y")
+        desc_item = self._make_item(
+            name="C", short_description="x", description="GitHub docs"
+        )
+        short_desc_item = self._make_item(
+            name="B", short_description="GitHub API", description="y"
+        )
+        title_item = self._make_item(
+            name="GitHub Server", short_description="x", description="y"
+        )
         items = [desc_item, short_desc_item, title_item]
         results = _search_items(items, "github")
         assert len(results) == 3
@@ -1570,9 +1584,7 @@ class TestObotClientNewMethods:
 
         client, mock_http = self._make_client_with_mock()
         mock_http.post = AsyncMock(return_value=mock_response)
-        result = await client.create_user_mcp_server(
-            "entry-1", url="https://my.example.com"
-        )
+        await client.create_user_mcp_server("entry-1", url="https://my.example.com")
 
         mock_http.post.assert_called_once_with(
             "/api/mcp-servers",
@@ -1591,7 +1603,7 @@ class TestObotClientNewMethods:
 
         client, mock_http = self._make_client_with_mock()
         mock_http.post = AsyncMock(return_value=mock_response)
-        result = await client.configure_user_mcp_server("s1", {"API_KEY": "val"})
+        await client.configure_user_mcp_server("s1", {"API_KEY": "val"})
 
         mock_http.post.assert_called_once_with(
             "/api/mcp-servers/s1/configure",
@@ -1607,7 +1619,7 @@ class TestObotClientNewMethods:
 
         client, mock_http = self._make_client_with_mock()
         mock_http.post = AsyncMock(return_value=mock_response)
-        result = await client.update_user_mcp_server_url("s1", "https://example.com")
+        await client.update_user_mcp_server_url("s1", "https://example.com")
 
         mock_http.post.assert_called_once_with(
             "/api/mcp-servers/s1/update-url",

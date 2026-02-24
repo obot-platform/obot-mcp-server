@@ -3,13 +3,12 @@
 import asyncio
 import re
 import uuid
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
 from fastmcp import Context, FastMCP
-from fastmcp.server.context import (
-    AcceptedElicitation,
+from fastmcp.server.elicitation import (
     CancelledElicitation,
     DeclinedElicitation,
 )
@@ -462,18 +461,22 @@ def _build_elicitation_model(
     fields: Dict[str, Any] = {}
 
     for param in requirements.get("required_parameters", []):
-        extra = {"format": "password"} if param.get("sensitive") else None
+        extras: Dict[str, Any] | None = (
+            {"format": "password"} if param.get("sensitive") else None
+        )
         fields[param["key"]] = (
             str,
             Field(
                 title=param.get("name", param["key"]),
                 description=param.get("description", ""),
-                json_schema_extra=extra,
+                json_schema_extra=extras,
             ),
         )
 
     for param in requirements.get("optional_parameters", []):
-        extra = {"format": "password"} if param.get("sensitive") else None
+        extra: Dict[str, Any] | None = (
+            {"format": "password"} if param.get("sensitive") else None
+        )
         fields[param["key"]] = (
             str,
             Field(
@@ -790,7 +793,7 @@ async def _handle_catalog_entry_connection(
             "message": "Configuration was cancelled by the user.",
         }
 
-    # result is AcceptedElicitation
+    # result is an accepted elicitation
     elicited_data = result.data
 
     # 9. Separate values into config dict and url
