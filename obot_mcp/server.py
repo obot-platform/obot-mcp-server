@@ -22,6 +22,17 @@ from .config import config
 # Create the FastMCP server
 mcp = FastMCP("obot-mcp-server")
 
+# This server exposes only tools. Remove prompt/resource handlers so the
+# initialize response does not advertise unsupported capabilities.
+for request_type in (
+    mcp_types.ListPromptsRequest,
+    mcp_types.GetPromptRequest,
+    mcp_types.ListResourcesRequest,
+    mcp_types.ListResourceTemplatesRequest,
+    mcp_types.ReadResourceRequest,
+):
+    mcp._mcp_server.request_handlers.pop(request_type, None)
+
 # Create a shared client instance
 obot_client = ObotClient()
 
@@ -522,10 +533,12 @@ async def _handle_oauth_elicitation(
         url=oauth_url,
         elicitationId=str(uuid.uuid4()),
     )
-    params.meta = mcp_types.RequestParams.Meta(**{
-        "ai.nanobot.meta/oauth-url": oauth_url,
-        "ai.nanobot.meta/server-name": name,
-    })
+    params.meta = mcp_types.RequestParams.Meta(
+        **{
+            "ai.nanobot.meta/oauth-url": oauth_url,
+            "ai.nanobot.meta/server-name": name,
+        }
+    )
 
     result = await ctx.session.send_request(
         mcp_types.ServerRequest(
@@ -596,7 +609,9 @@ async def obot_connect_to_mcp_server(
         return {"status": "error", "message": f"Failed to fetch server: {e}"}
 
     if multi_user_server:
-        return await _handle_multi_user_server_connection(server_id, multi_user_server, ctx)
+        return await _handle_multi_user_server_connection(
+            server_id, multi_user_server, ctx
+        )
 
     # --- Not found ---
     return {
@@ -629,7 +644,9 @@ async def _handle_multi_user_server_connection(
     try:
         oauth_url = await obot_client.get_mcp_server_oauth_url(server_id)
         if oauth_url:
-            oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url, server_id)
+            oauth_success = await _handle_oauth_elicitation(
+                ctx, name, oauth_url, server_id
+            )
             if not oauth_success:
                 return {
                     "status": "cancelled",
@@ -687,7 +704,9 @@ async def _handle_catalog_entry_connection(
         try:
             oauth_url = await obot_client.get_mcp_server_oauth_url(user_server_id)
             if oauth_url:
-                oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url, user_server_id)
+                oauth_success = await _handle_oauth_elicitation(
+                    ctx, name, oauth_url, user_server_id
+                )
                 if not oauth_success:
                     return {
                         "status": "cancelled",
@@ -738,7 +757,9 @@ async def _handle_catalog_entry_connection(
             # Check for OAuth requirement
             oauth_url = await obot_client.get_mcp_server_oauth_url(user_server_id)
             if oauth_url:
-                oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url, user_server_id)
+                oauth_success = await _handle_oauth_elicitation(
+                    ctx, name, oauth_url, user_server_id
+                )
                 if not oauth_success:
                     return {
                         "status": "cancelled",
@@ -826,7 +847,9 @@ async def _handle_catalog_entry_connection(
     # Check and handle OAuth requirement
     oauth_url = await obot_client.get_mcp_server_oauth_url(user_server_id)
     if oauth_url:
-        oauth_success = await _handle_oauth_elicitation(ctx, name, oauth_url, user_server_id)
+        oauth_success = await _handle_oauth_elicitation(
+            ctx, name, oauth_url, user_server_id
+        )
         if not oauth_success:
             return {
                 "status": "cancelled",
