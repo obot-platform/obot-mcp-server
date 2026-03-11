@@ -70,7 +70,7 @@ class ObotClient:
         data = response.json()
 
         # Extract items from response, handle pagination if needed
-        items = data.get("items", [])
+        items = data.get("items") or []
         return items[:limit]
 
     async def get_catalog_entry(self, entry_id: str) -> Optional[Dict[str, Any]]:
@@ -112,7 +112,7 @@ class ObotClient:
         data = response.json()
 
         # Extract items from response, handle pagination if needed
-        items = data.get("items", [])
+        items = data.get("items") or []
         return items[:limit]
 
     async def get_multi_user_server(self, server_id: str) -> Optional[Dict[str, Any]]:
@@ -149,7 +149,7 @@ class ObotClient:
         )
         response.raise_for_status()
         data = response.json()
-        return data.get("items", [])
+        return data.get("items") or []
 
     async def create_user_mcp_server(
         self, catalog_entry_id: str, url: Optional[str] = None
