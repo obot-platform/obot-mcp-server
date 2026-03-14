@@ -75,12 +75,94 @@ def _extract_server_info(item: Dict[str, Any], item_type: str) -> Dict[str, Any]
         info["deployment_status"] = item.get("deploymentStatus", "")
         # Construct connect URL using the standard mcp-connect format
         # Multi-user servers use the server ID as the connection identifier
-        server_id = item.get("id", "")
-        info["connect_url"] = (
-            f"{config.obot_server_url}/mcp-connect/{server_id}" if server_id else ""
-        )
+        info["connect_url"] = _build_connect_url(item.get("id", ""))
 
     return info
+
+
+def _build_connect_url(server_id: str) -> str:
+    """Build the standard Obot MCP connect URL for a server identifier."""
+    return f"{config.obot_server_url}/mcp-connect/{server_id}" if server_id else ""
+
+
+
+def _normalize_user_server(
+    item: Dict[str, Any], catalog_entries_by_id: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Normalize a user-owned MCP server for list output."""
+    server_id = item.get("id", "")
+    catalog_entry_id = item.get("catalogEntryID", "")
+    manifest = item.get("manifest", {})
+    catalog_manifest = catalog_entries_by_id.get(catalog_entry_id, {}).get("manifest", {})
+    configured = bool(item.get("configured", False))
+
+    connect_url = _build_connect_url(server_id) if configured else ""
+
+    return {
+        "id": server_id,
+        "name": manifest.get("name")
+        or catalog_manifest.get("name")
+        or "Unknown",
+        "alias": manifest.get("alias", ""),
+        "description": manifest.get("shortDescription")
+        or catalog_manifest.get("shortDescription")
+        or "",
+        "runtime": manifest.get("runtime")
+        or catalog_manifest.get("runtime")
+        or "",
+        "type": "user_server",
+        "configured": configured,
+        "catalog_entry_id": catalog_entry_id,
+        "connect_url": connect_url,
+        "needs_url": bool(item.get("needsURL", False)),
+        "deployment_status": item.get("deploymentStatus", ""),
+        "missing_required_env_vars": item.get("missingRequiredEnvVars", []),
+        "missing_required_headers": item.get("missingRequiredHeaders", []),
+        "missing_oauth_credentials": bool(item.get("missingOAuthCredentials", False)),
+    }
+
+
+def _is_probable_agent_user_server(item: Dict[str, Any]) -> bool:
+    """Heuristically identify agent-backed user MCP servers.
+
+    This is not a documented API contract. It is based on observed payloads:
+    currently agent servers use IDs prefixed with ``ms1nba`` and don't have
+    ``catalogEntryID`` and ``powerUserWorkspaceID`` set. We're going to mark it
+    as an agent server if either of those conditions are met.
+    """
+    server_id = item.get("id", "")
+    if isinstance(server_id, str) and server_id.startswith("ms1nba"):
+        return True
+
+    return (
+        not item.get("catalogEntryID")
+        and not item.get("powerUserWorkspaceID")
+    )
+
+
+def _normalize_user_server_instance(
+    item: Dict[str, Any], multi_user_servers_by_id: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Normalize a user-owned MCP server instance for list output."""
+    instance_id = item.get("id", "")
+    mcp_server_id = item.get("mcpServerID", "")
+    multi_user_server = multi_user_servers_by_id.get(mcp_server_id, {})
+    manifest = multi_user_server.get("manifest", {})
+
+    connect_url = _build_connect_url(mcp_server_id)
+
+    return {
+        "id": instance_id,
+        "name": manifest.get("name", "Unknown"),
+        "description": manifest.get("shortDescription", ""),
+        "runtime": manifest.get("runtime", ""),
+        "type": "user_server_instance",
+        "configured": True,
+        "mcp_server_id": mcp_server_id,
+        "catalog_entry_id": item.get("catalogEntryID")
+        or multi_user_server.get("catalogEntryID", ""),
+        "connect_url": connect_url,
+    }
 
 
 def _filter_by_runtime(
@@ -218,6 +300,59 @@ async def obot_list_mcp_servers(
     return await list_mcp_servers_impl(
         include_entries, include_servers, runtime_filter, limit
     )
+
+
+async def list_connected_mcp_servers_impl() -> Dict[str, Any]:
+    """
+    Implementation for listing connected MCP servers for the current user.
+
+    Returns:
+        Dictionary with:
+        - connected_servers: Import-ready connected/configured servers
+    """
+    raw_entries, raw_servers, raw_user_servers, raw_user_server_instances = (
+        await asyncio.gather(
+            obot_client.get_catalog_entries(limit=1000),
+            obot_client.get_multi_user_servers(limit=1000),
+            obot_client.list_user_mcp_servers(),
+            obot_client.list_user_mcp_server_instances(),
+        )
+    )
+
+    catalog_entries_by_id = {entry.get("id", ""): entry for entry in raw_entries}
+    multi_user_servers_by_id = {server.get("id", ""): server for server in raw_servers}
+
+    user_servers = [
+        _normalize_user_server(server, catalog_entries_by_id)
+        for server in raw_user_servers
+        if not _is_probable_agent_user_server(server)
+    ]
+    user_server_instances = [
+        _normalize_user_server_instance(instance, multi_user_servers_by_id)
+        for instance in raw_user_server_instances
+    ]
+
+    connected_servers = [
+        server
+        for server in user_servers
+        if server.get("configured") and server.get("connect_url")
+    ] + [instance for instance in user_server_instances if instance.get("connect_url")]
+
+    return {
+        "connected_servers": connected_servers,
+    }
+
+
+@mcp.tool()
+async def obot_list_connected_mcp_servers() -> Dict[str, Any]:
+    """
+    List connected/configured MCP servers for the current user.
+
+    Returns:
+        Dictionary with:
+        - connected_servers: Import-ready connected/configured servers
+    """
+    return await list_connected_mcp_servers_impl()
 
 
 async def search_mcp_servers_impl(

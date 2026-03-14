@@ -5,6 +5,7 @@ MCP server for Obot that provides tools for discovering, searching, and connecti
 ## Tools
 
 - **`obot_list_mcp_servers`** - List available MCP servers with optional runtime filtering
+- **`obot_list_connected_mcp_servers`** - List connected/configured MCP servers for the current user
 - **`obot_search_mcp_servers`** - Search servers by keyword (matches name and description)
 - **`obot_connect_to_mcp_server`** - Connect to a server by ID, handling configuration, OAuth, and launch
 

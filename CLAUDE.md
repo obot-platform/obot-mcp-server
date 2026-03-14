@@ -25,11 +25,12 @@ uv run pytest test_server.py::TestClassName::test_method -v
 ## Architecture
 
 - **`main.py`** - Entry point. Adds a `/healthz` health check route, then runs the FastMCP server on `0.0.0.0:8080` at path `/mcp` using streamable-http transport.
-- **`obot_mcp/server.py`** - FastMCP server exposing 3 MCP tools (all prefixed `obot_`):
+- **`obot_mcp/server.py`** - FastMCP server exposing 4 MCP tools (all prefixed `obot_`):
   - `obot_list_mcp_servers` - Lists available MCP servers with optional runtime filtering
+  - `obot_list_connected_mcp_servers` - Lists connected/configured MCP servers for the current user
   - `obot_search_mcp_servers` - Search servers by keyword (name/description), results ranked by match priority (title > short description > description)
   - `obot_connect_to_mcp_server` - Full connection flow: resolves ID as catalog entry or multi-user server, elicits configuration from user if needed, handles OAuth via URL-mode elicitation with polling, creates/launches the server, returns a `connect_url`
-- **`obot_mcp/client.py`** - `ObotClient` async HTTP client using `httpx.AsyncClient`. Auth is forwarded from the incoming request's `Authorization` header (via `fastmcp.server.dependencies.get_http_request`), not from env vars.
+- **`obot_mcp/client.py`** - `ObotClient` async HTTP client using `httpx.AsyncClient`. Auth is forwarded from the incoming request's `Authorization` header (via `fastmcp.server.dependencies.get_http_request`), not from env vars. The connected-server tool joins `/api/all-mcps/entries`, `/api/all-mcps/servers`, `/api/mcp-servers`, and `/api/mcp-server-instances`.
 - **`obot_mcp/config.py`** - Reads `OBOT_URL` env var (default: `http://localhost:8080`)
 
 ### Two Server Types

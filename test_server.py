@@ -16,6 +16,8 @@ from obot_mcp.server import (
     _build_elicitation_model,
     _extract_configuration_requirements,
     _find_existing_user_server,
+    list_connected_mcp_servers_impl,
+    list_mcp_servers_impl,
     _search_items,
     _validate_hostname,
     obot_client,
@@ -521,6 +523,212 @@ class TestFindExistingUserServer:
         ):
             result = await _find_existing_user_server("entry-1")
         assert result is None
+
+
+# --- Test list_mcp_servers_impl ---
+
+
+class TestListMcpServers:
+    @pytest.mark.asyncio
+    async def test_list_returns_original_inventory_shape(self):
+        raw_entries = [
+            {
+                "id": "entry-1",
+                "manifest": {
+                    "name": "Gmail",
+                    "shortDescription": "Email access",
+                    "runtime": "remote",
+                },
+            },
+            {
+                "id": "entry-2",
+                "manifest": {
+                    "name": "Notion",
+                    "shortDescription": "Workspace access",
+                    "runtime": "remote",
+                },
+            },
+        ]
+        raw_multi_user_servers = [
+            {
+                "id": "shared-1",
+                "catalogEntryID": "entry-shared-1",
+                "configured": True,
+                "needsURL": False,
+                "deploymentStatus": "ready",
+                "manifest": {
+                    "name": "Shared Drive",
+                    "shortDescription": "Shared docs",
+                    "runtime": "containerized",
+                },
+            },
+            {
+                "id": "shared-2",
+                "catalogEntryID": "entry-shared-2",
+                "configured": True,
+                "needsURL": False,
+                "deploymentStatus": "ready",
+                "manifest": {
+                    "name": "Shared Calendar",
+                    "shortDescription": "Shared scheduling",
+                    "runtime": "containerized",
+                },
+            },
+        ]
+
+        with (
+            patch.object(
+                obot_client,
+                "get_catalog_entries",
+                new_callable=AsyncMock,
+                return_value=raw_entries,
+            ),
+            patch.object(
+                obot_client,
+                "get_multi_user_servers",
+                new_callable=AsyncMock,
+                return_value=raw_multi_user_servers,
+            ),
+        ):
+            result = await list_mcp_servers_impl(limit=1)
+
+        assert "catalog_entries" in result
+        assert "multi_user_servers" in result
+        assert "total_count" in result
+        assert "user_servers" not in result
+        assert "user_server_instances" not in result
+        assert "connected_servers" not in result
+        assert "connected_server_count" not in result
+
+        assert len(result["catalog_entries"]) == 1
+        assert len(result["multi_user_servers"]) == 1
+        assert result["total_count"] == 2
+
+        catalog_entry = result["catalog_entries"][0]
+        assert catalog_entry["id"] == "entry-1"
+        assert catalog_entry["name"] == "Gmail"
+        assert catalog_entry["type"] == "catalog_entry"
+
+        multi_user_server = result["multi_user_servers"][0]
+        assert multi_user_server["id"] == "shared-1"
+        assert multi_user_server["name"] == "Shared Drive"
+        assert (
+            multi_user_server["connect_url"]
+            == "http://localhost:8080/mcp-connect/shared-1"
+        )
+
+
+class TestListConnectedMcpServers:
+    @pytest.mark.asyncio
+    async def test_list_connected_servers_includes_user_servers_and_instances(self):
+        raw_entries = [
+            {
+                "id": "entry-1",
+                "manifest": {
+                    "name": "Gmail",
+                    "shortDescription": "Email access",
+                    "runtime": "remote",
+                },
+            },
+            {
+                "id": "entry-2",
+                "manifest": {
+                    "name": "Notion",
+                    "shortDescription": "Workspace access",
+                    "runtime": "remote",
+                },
+            },
+        ]
+        raw_multi_user_servers = [
+            {
+                "id": "shared-1",
+                "catalogEntryID": "entry-shared-1",
+                "configured": True,
+                "needsURL": False,
+                "deploymentStatus": "ready",
+                "manifest": {
+                    "name": "Shared Drive",
+                    "shortDescription": "Shared docs",
+                    "runtime": "containerized",
+                },
+            },
+        ]
+        raw_user_servers = [
+            {
+                "id": "user-1",
+                "catalogEntryID": "entry-1",
+                "configured": True,
+                "connectURL": "http://localhost:8080/mcp-connect/user-1",
+            },
+            {
+                "id": "user-2",
+                "catalogEntryID": "entry-2",
+                "configured": False,
+                "needsURL": True,
+                "missingRequiredHeaders": ["Authorization"],
+            },
+        ]
+        raw_user_server_instances = [
+            {
+                "id": "instance-1",
+                "mcpServerID": "shared-1",
+                "connectURL": "http://localhost:8080/mcp-connect/instance-1",
+            }
+        ]
+
+        with (
+            patch.object(
+                obot_client,
+                "get_catalog_entries",
+                new_callable=AsyncMock,
+                return_value=raw_entries,
+            ),
+            patch.object(
+                obot_client,
+                "get_multi_user_servers",
+                new_callable=AsyncMock,
+                return_value=raw_multi_user_servers,
+            ),
+            patch.object(
+                obot_client,
+                "list_user_mcp_servers",
+                new_callable=AsyncMock,
+                return_value=raw_user_servers,
+            ),
+            patch.object(
+                obot_client,
+                "list_user_mcp_server_instances",
+                new_callable=AsyncMock,
+                return_value=raw_user_server_instances,
+            ),
+        ):
+            result = await list_connected_mcp_servers_impl()
+
+        assert set(result.keys()) == {"connected_servers"}
+        assert len(result["connected_servers"]) == 2
+
+        connected_ids = {item["id"] for item in result["connected_servers"]}
+        assert connected_ids == {"user-1", "instance-1"}
+
+        connected_user_server = next(
+            item for item in result["connected_servers"] if item["id"] == "user-1"
+        )
+        assert connected_user_server["type"] == "user_server"
+        assert connected_user_server["name"] == "Gmail"
+        assert (
+            connected_user_server["connect_url"]
+            == "http://localhost:8080/mcp-connect/user-1"
+        )
+
+        connected_instance = next(
+            item for item in result["connected_servers"] if item["id"] == "instance-1"
+        )
+        assert connected_instance["type"] == "user_server_instance"
+        assert connected_instance["name"] == "Shared Drive"
+        assert (
+            connected_instance["connect_url"]
+            == "http://localhost:8080/mcp-connect/shared-1"
+        )
 
 
 # --- Test obot_connect_to_mcp_server ---
@@ -1558,6 +1766,19 @@ class TestObotClientNewMethods:
 
         assert len(result) == 2
         mock_http.get.assert_called_once_with("/api/mcp-servers", headers={})
+
+    @pytest.mark.asyncio
+    async def test_list_user_mcp_server_instances(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"items": [{"id": "i1"}, {"id": "i2"}]}
+        mock_response.raise_for_status = MagicMock()
+
+        client, mock_http = self._make_client_with_mock()
+        mock_http.get = AsyncMock(return_value=mock_response)
+        result = await client.list_user_mcp_server_instances()
+
+        assert len(result) == 2
+        mock_http.get.assert_called_once_with("/api/mcp-server-instances", headers={})
 
     @pytest.mark.asyncio
     async def test_create_user_mcp_server_without_url(self):

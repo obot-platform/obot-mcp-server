@@ -151,6 +151,20 @@ class ObotClient:
         data = response.json()
         return data.get("items", [])
 
+    async def list_user_mcp_server_instances(self) -> List[Dict[str, Any]]:
+        """
+        List the current user's MCP server instances.
+
+        Returns:
+            List of user server instance dictionaries
+        """
+        response = await self.client.get(
+            "/api/mcp-server-instances", headers=self._get_auth_headers()
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get("items", [])
+
     async def create_user_mcp_server(
         self, catalog_entry_id: str, url: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -263,4 +277,3 @@ class ObotClient:
             if e.response.status_code == 404:
                 return None
             raise
-
