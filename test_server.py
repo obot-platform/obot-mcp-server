@@ -16,10 +16,10 @@ from obot_mcp.server import (
     _build_elicitation_model,
     _extract_configuration_requirements,
     _find_existing_user_server,
-    list_connected_mcp_servers_impl,
-    list_mcp_servers_impl,
     _search_items,
     _validate_hostname,
+    list_connected_mcp_servers_impl,
+    list_mcp_servers_impl,
     obot_client,
 )
 from obot_mcp.server import (
@@ -1382,12 +1382,20 @@ class TestConnectToMcpServer:
                 new_callable=AsyncMock,
                 return_value=None,
             ),
+            patch.object(
+                obot_client,
+                "list_user_mcp_server_instances",
+                new_callable=AsyncMock,
+                return_value=[
+                    {"id": "msi-1", "mcpServerID": "multi-server-1", "configured": True}
+                ],
+            ),
         ):
             result = await obot_connect_to_mcp_server(
                 server_id="multi-server-1", ctx=ctx
             )
 
-        assert result["status"] == "available"
+        assert result["status"] == "already_connected"
         assert (
             result["connect_url"] == "http://localhost:8080/mcp-connect/multi-server-1"
         )
@@ -1427,6 +1435,18 @@ class TestConnectToMcpServer:
                 new_callable=AsyncMock,
                 side_effect=[oauth_url, None],
             ),
+            patch.object(
+                obot_client,
+                "list_user_mcp_server_instances",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                obot_client,
+                "connect_to_multi_user_mcp_server",
+                new_callable=AsyncMock,
+                return_value={"id": "msi-2"},
+            ),
             patch("obot_mcp.server.asyncio.sleep", new_callable=AsyncMock),
         ):
             result = await obot_connect_to_mcp_server(
@@ -1440,18 +1460,29 @@ class TestConnectToMcpServer:
         ctx.session.send_request.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_multi_user_server_not_configured(self):
-        """Test unconfigured multi-user server returns error with web UI URL."""
+    async def test_multi_user_server_with_config(self):
+        """Test multi-user server with user config creates and configures an instance."""
         multi_user_server = {
             "id": "multi-server-3",
             "configured": False,
             "needsURL": False,
             "manifest": {
-                "name": "Unconfigured Server",
+                "name": "Configured Instance Server",
                 "runtime": "uvx",
+                "multiUserConfig": {
+                    "userDefinedHeaders": [
+                        {
+                            "name": "X-API-Key",
+                            "key": "API_KEY",
+                            "description": "API key",
+                            "required": True,
+                            "sensitive": True,
+                        }
+                    ]
+                },
             },
         }
-        ctx = _make_ctx()
+        ctx = _make_ctx(AcceptedElicitation(data={"API_KEY": "secret"}))
 
         with (
             patch.object(
@@ -1466,18 +1497,42 @@ class TestConnectToMcpServer:
                 new_callable=AsyncMock,
                 return_value=multi_user_server,
             ),
+            patch.object(
+                obot_client,
+                "list_user_mcp_server_instances",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                obot_client,
+                "connect_to_multi_user_mcp_server",
+                new_callable=AsyncMock,
+                return_value={"id": "msi1-2-ms1zxpgl"},
+            ),
+            patch.object(
+                obot_client,
+                "configure_mcp_server_instance",
+                new_callable=AsyncMock,
+                return_value={},
+            ) as mock_configure,
+            patch.object(
+                obot_client,
+                "get_mcp_server_oauth_url",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             result = await obot_connect_to_mcp_server(
                 server_id="multi-server-3", ctx=ctx
             )
 
-        assert result["status"] == "error"
-        assert "configure_url" in result
-        assert "requires configuration" in result["message"]
+        assert result["status"] == "configured"
+        assert result["server_instance_id"] == "msi1-2-ms1zxpgl"
+        mock_configure.assert_called_once_with("msi1-2-ms1zxpgl", {"API_KEY": "secret"})
 
     @pytest.mark.asyncio
     async def test_multi_user_server_needs_url(self):
-        """Test multi-user server that needs URL returns error with web UI URL."""
+        """Test multi-user server that needs URL can still create an instance."""
         multi_user_server = {
             "id": "multi-server-4",
             "configured": True,
@@ -1502,14 +1557,33 @@ class TestConnectToMcpServer:
                 new_callable=AsyncMock,
                 return_value=multi_user_server,
             ),
+            patch.object(
+                obot_client,
+                "list_user_mcp_server_instances",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                obot_client,
+                "connect_to_multi_user_mcp_server",
+                new_callable=AsyncMock,
+                return_value={"id": "msi-4"},
+            ),
+            patch.object(
+                obot_client,
+                "get_mcp_server_oauth_url",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             result = await obot_connect_to_mcp_server(
                 server_id="multi-server-4", ctx=ctx
             )
 
-        assert result["status"] == "error"
-        assert "configure_url" in result
-        assert "URL configuration" in result["message"]
+        assert result["status"] == "available"
+        assert (
+            result["connect_url"] == "http://localhost:8080/mcp-connect/multi-server-4"
+        )
 
     @pytest.mark.asyncio
     async def test_multi_user_server_oauth_declined(self):
@@ -1545,6 +1619,18 @@ class TestConnectToMcpServer:
                 "get_mcp_server_oauth_url",
                 new_callable=AsyncMock,
                 return_value=oauth_url,
+            ),
+            patch.object(
+                obot_client,
+                "list_user_mcp_server_instances",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch.object(
+                obot_client,
+                "connect_to_multi_user_mcp_server",
+                new_callable=AsyncMock,
+                return_value={"id": "msi-5"},
             ),
         ):
             result = await obot_connect_to_mcp_server(
@@ -1852,6 +1938,24 @@ class TestObotClientNewMethods:
 
         mock_http.post.assert_called_once_with(
             "/api/mcp-servers/s1/configure",
+            json={"API_KEY": "val"},
+            headers={},
+        )
+
+    @pytest.mark.asyncio
+    async def test_configure_mcp_server_instance(self):
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "ok"}
+        mock_response.raise_for_status = MagicMock()
+
+        client, mock_http = self._make_client_with_mock()
+        mock_http.post = AsyncMock(return_value=mock_response)
+        await client.configure_mcp_server_instance(
+            "msi1-2-ms1zxpgl", {"API_KEY": "val"}
+        )
+
+        mock_http.post.assert_called_once_with(
+            "/api/mcp-server-instances/msi1-2-ms1zxpgl/configure",
             json={"API_KEY": "val"},
             headers={},
         )

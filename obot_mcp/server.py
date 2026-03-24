@@ -75,6 +75,7 @@ def _extract_server_info(item: Dict[str, Any], item_type: str) -> Dict[str, Any]
     else:  # multi_user_server
         info["configured"] = item.get("configured", False)
         info["needs_url"] = item.get("needsURL", False)
+        info["requires_configuration"] = bool(item.get("multiUserConfig"))
         info["deployment_status"] = item.get("deploymentStatus", "")
         # Construct connect URL using the standard mcp-connect format
         # Multi-user servers use the server ID as the connection identifier
@@ -336,7 +337,11 @@ async def list_connected_mcp_servers_impl() -> Dict[str, Any]:
         server
         for server in user_servers
         if server.get("configured") and server.get("connect_url")
-    ] + [instance for instance in user_server_instances if instance.get("connect_url")]
+    ] + [
+        instance
+        for instance in user_server_instances
+        if instance.get("configured") and instance.get("connect_url")
+    ]
 
     return {
         "connected_servers": connected_servers,
@@ -529,6 +534,59 @@ def _extract_configuration_requirements(manifest: Dict[str, Any]) -> Dict[str, A
         "optional_parameters": optional_parameters,
         "url_configuration": url_configuration,
         "has_oauth_requirement": has_oauth_requirement,
+    }
+
+
+def _extract_multi_user_configuration_requirements(
+    server: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Parse a multi-user server's user-specific header requirements."""
+    multi_user_config = server.get("manifest", {}).get("multiUserConfig")
+    if not multi_user_config:
+        return {
+            "required_parameters": [],
+            "optional_parameters": [],
+            "url_configuration": None,
+            "has_oauth_requirement": False,
+        }
+
+    required_parameters: List[Dict[str, Any]] = []
+    optional_parameters: List[Dict[str, Any]] = []
+
+    headers = (
+        multi_user_config.get("userDefinedHeaders", [])
+        if isinstance(multi_user_config, dict)
+        else []
+    )
+    if not isinstance(headers, list):
+        headers = []
+
+    for header in headers:
+        if not isinstance(header, dict) or header.get("value"):
+            continue
+
+        key = header.get("key", header.get("name", ""))
+        if not key:
+            continue
+
+        param = {
+            "key": key,
+            "name": header.get("name", key),
+            "description": header.get("description", ""),
+            "sensitive": header.get("sensitive", False),
+            "type": "header",
+        }
+
+        if header.get("required", False):
+            required_parameters.append(param)
+        else:
+            optional_parameters.append(param)
+
+    return {
+        "required_parameters": required_parameters,
+        "optional_parameters": optional_parameters,
+        "url_configuration": None,
+        "has_oauth_requirement": False,
     }
 
 
@@ -799,20 +857,114 @@ async def _handle_multi_user_server_connection(
 ) -> Dict[str, Any]:
     """Handle connection flow for a multi-user server."""
     name = server.get("manifest", {}).get("name", "Unknown")
-    connect_url = f"{config.obot_server_url}/mcp-connect/{server_id}"
+    icon = server.get("manifest", {}).get("icon", None)
+    connect_url = _build_connect_url(server_id)
+    requirements = _extract_multi_user_configuration_requirements(server)
+    has_config = bool(
+        requirements["required_parameters"] or requirements["optional_parameters"]
+    )
 
     # Check if the user has already connected to the server
+    existing_instance: Optional[Dict[str, Any]] = None
     try:
         server_instances = await obot_client.list_user_mcp_server_instances()
         for instance in server_instances:
-            if instance["mcpServerID"] == server_id:
-                return {
-                    "status": "already_connected",
-                    "connect_url": connect_url,
-                    "message": f"Server '{name}' is already connected and ready to use.",
-                }
+            if instance.get("mcpServerID") == server_id:
+                existing_instance = instance
+                if not has_config or instance.get("configured", True):
+                    return {
+                        "status": "already_connected",
+                        "connect_url": connect_url,
+                        "message": f"Server '{name}' is already connected and ready to use.",
+                    }
+                break
 
-        await obot_client.connect_to_multi_user_mcp_server(server_id)
+        if existing_instance:
+            instance_id = existing_instance.get("id", "")
+        else:
+            created = await obot_client.connect_to_multi_user_mcp_server(server_id)
+            instance_id = created.get("id", "")
+    except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
+        return {"status": "error", "message": f"Failed to connect to server: {e}"}
+
+    if has_config:
+        ConfigModel = _build_elicitation_model(requirements, None)
+        result = await _handle_configuration_form_elicitation(
+            ctx,
+            f"Please provide the configuration for {name}:",
+            ConfigModel,
+            name,
+            icon,
+        )
+
+        if isinstance(result, (DeclinedElicitation, CancelledElicitation)):
+            return {
+                "status": "cancelled",
+                "message": "Configuration was cancelled by the user.",
+            }
+
+        elicited_data = result.data
+        if isinstance(elicited_data, dict):
+            data_dict = elicited_data
+        else:
+            data_dict = (
+                elicited_data.model_dump()
+                if hasattr(elicited_data, "model_dump")
+                else dict(elicited_data)
+            )
+
+        config_dict = {
+            key: value for key, value in data_dict.items() if key != "url" and value
+        }
+
+        try:
+            await obot_client.configure_mcp_server_instance(instance_id, config_dict)
+        except (httpx.HTTPStatusError, httpx.TimeoutException) as e:
+            return {
+                "status": "error",
+                "message": f"Failed to configure server instance: {e}",
+            }
+
+        try:
+            oauth_url = await obot_client.get_mcp_server_oauth_url(server_id)
+            if oauth_url:
+                oauth_success = await _handle_oauth_elicitation(
+                    ctx,
+                    name,
+                    oauth_url,
+                    server_id,
+                    icon,
+                )
+                if not oauth_success:
+                    return {
+                        "status": "cancelled",
+                        "message": "OAuth authentication was cancelled by the user.",
+                    }
+        except httpx.HTTPError:
+            pass
+
+        return {
+            "status": "configured",
+            "server_instance_id": instance_id,
+            "connect_url": connect_url,
+            "message": f"Server '{name}' has been configured and is ready to connect.",
+        }
+
+    try:
+        oauth_url = await obot_client.get_mcp_server_oauth_url(server_id)
+        if oauth_url:
+            oauth_success = await _handle_oauth_elicitation(
+                ctx,
+                name,
+                oauth_url,
+                server_id,
+                icon,
+            )
+            if not oauth_success:
+                return {
+                    "status": "cancelled",
+                    "message": "OAuth authentication was cancelled by the user.",
+                }
     except (httpx.HTTPStatusError, httpx.TimeoutException):
         pass
 

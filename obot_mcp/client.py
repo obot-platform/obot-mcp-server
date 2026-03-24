@@ -296,3 +296,24 @@ class ObotClient:
         )
         response.raise_for_status()
         return response.json()
+
+    async def configure_mcp_server_instance(
+        self, instance_id: str, config: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """
+        Configure a multi-user MCP server instance with user-specific values.
+
+        Args:
+            instance_id: The MCP server instance ID
+            config: Flat dictionary of key-value pairs for configuration
+
+        Returns:
+            Response dictionary
+        """
+        response = await self.client.post(
+            f"/api/mcp-server-instances/{instance_id}/configure",
+            json=config,
+            headers=self._get_auth_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
