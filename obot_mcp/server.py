@@ -85,7 +85,6 @@ def _build_connect_url(server_id: str) -> str:
     return f"{config.obot_server_url}/mcp-connect/{server_id}" if server_id else ""
 
 
-
 def _normalize_user_server(
     item: Dict[str, Any], catalog_entries_by_id: Dict[str, Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -93,23 +92,21 @@ def _normalize_user_server(
     server_id = item.get("id", "")
     catalog_entry_id = item.get("catalogEntryID", "")
     manifest = item.get("manifest", {})
-    catalog_manifest = catalog_entries_by_id.get(catalog_entry_id, {}).get("manifest", {})
+    catalog_manifest = catalog_entries_by_id.get(catalog_entry_id, {}).get(
+        "manifest", {}
+    )
     configured = bool(item.get("configured", False))
 
     connect_url = _build_connect_url(server_id) if configured else ""
 
     return {
         "id": server_id,
-        "name": manifest.get("name")
-        or catalog_manifest.get("name")
-        or "Unknown",
+        "name": manifest.get("name") or catalog_manifest.get("name") or "Unknown",
         "alias": manifest.get("alias", ""),
         "description": manifest.get("shortDescription")
         or catalog_manifest.get("shortDescription")
         or "",
-        "runtime": manifest.get("runtime")
-        or catalog_manifest.get("runtime")
-        or "",
+        "runtime": manifest.get("runtime") or catalog_manifest.get("runtime") or "",
         "type": "user_server",
         "configured": configured,
         "catalog_entry_id": catalog_entry_id,
@@ -134,10 +131,7 @@ def _is_probable_agent_user_server(item: Dict[str, Any]) -> bool:
     if isinstance(server_id, str) and server_id.startswith("ms1nba"):
         return True
 
-    return (
-        not item.get("catalogEntryID")
-        and not item.get("powerUserWorkspaceID")
-    )
+    return not item.get("catalogEntryID") and not item.get("powerUserWorkspaceID")
 
 
 def _normalize_user_server_instance(
@@ -310,13 +304,16 @@ async def list_connected_mcp_servers_impl() -> Dict[str, Any]:
         Dictionary with:
         - connected_servers: Import-ready connected/configured servers
     """
-    raw_entries, raw_servers, raw_user_servers, raw_user_server_instances = (
-        await asyncio.gather(
-            obot_client.get_catalog_entries(limit=1000),
-            obot_client.get_multi_user_servers(limit=1000),
-            obot_client.list_user_mcp_servers(),
-            obot_client.list_user_mcp_server_instances(),
-        )
+    (
+        raw_entries,
+        raw_servers,
+        raw_user_servers,
+        raw_user_server_instances,
+    ) = await asyncio.gather(
+        obot_client.get_catalog_entries(limit=1000),
+        obot_client.get_multi_user_servers(limit=1000),
+        obot_client.list_user_mcp_servers(),
+        obot_client.list_user_mcp_server_instances(),
     )
 
     catalog_entries_by_id = {entry.get("id", ""): entry for entry in raw_entries}
@@ -760,38 +757,24 @@ async def _handle_multi_user_server_connection(
     server_id: str, server: Dict[str, Any], ctx: Context
 ) -> Dict[str, Any]:
     """Handle connection flow for a multi-user server."""
-    configured = server.get("configured", False)
-    needs_url = server.get("needsURL", False)
     name = server.get("manifest", {}).get("name", "Unknown")
+    connect_url = f"{config.obot_server_url}/mcp-connect/{server_id}"
 
-    if not configured or needs_url:
-        configure_url = f"{config.obot_server_url}/mcp-servers/s/{server_id}"
-        if needs_url:
-            message = f"Server '{name}' requires URL configuration. Please visit {configure_url} to update the server URL."
-        else:
-            message = f"Server '{name}' requires configuration. Please visit {configure_url} to configure required settings."
-        return {
-            "status": "error",
-            "configure_url": configure_url,
-            "message": message,
-        }
-
-    # Check for OAuth requirement
+    # Check if the user has already connected to the server
     try:
-        oauth_url = await obot_client.get_mcp_server_oauth_url(server_id)
-        if oauth_url:
-            oauth_success = await _handle_oauth_elicitation(
-                ctx, name, oauth_url, server_id
-            )
-            if not oauth_success:
+        server_instances = await obot_client.list_user_mcp_server_instances()
+        for instance in server_instances:
+            if instance["mcpServerID"] == server_id:
                 return {
-                    "status": "cancelled",
-                    "message": "OAuth authentication was cancelled by the user.",
+                    "status": "already_connected",
+                    "connect_url": connect_url,
+                    "message": f"Server '{name}' is already connected and ready to use.",
                 }
+
+        await obot_client.connect_to_multi_user_mcp_server(server_id)
     except (httpx.HTTPStatusError, httpx.TimeoutException):
         pass
 
-    connect_url = f"{config.obot_server_url}/mcp-connect/{server_id}"
     return {
         "status": "available",
         "connect_url": connect_url,

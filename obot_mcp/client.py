@@ -277,3 +277,22 @@ class ObotClient:
             if e.response.status_code == 404:
                 return None
             raise
+
+    async def connect_to_multi_user_mcp_server(
+        self, mcp_server_id: str, url: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Connect to a user multi-user MCP server.
+
+        Args:
+            mcp_server_id: The MCP server ID to connect to
+
+        Returns:
+            Created server dictionary
+        """
+        body: Dict[str, Any] = {"mcpServerID": mcp_server_id}
+        response = await self.client.post(
+            "/api/mcp-server-instances", json=body, headers=self._get_auth_headers()
+        )
+        response.raise_for_status()
+        return response.json()
