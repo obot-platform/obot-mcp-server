@@ -1,0 +1,4 @@
+
+# Dependabot dependency ownership
+/pyproject.toml @obot-platform/obot-backend
+/uv.lock @obot-platform/obot-backend
