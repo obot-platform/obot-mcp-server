@@ -14,9 +14,45 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    needs: test
+    if: always()
     steps:
-      - uses: actions/checkout@v4
-      - run: "true"
+      - name: Require passing unit tests
+        run: test "${{ needs.test.result }}" = "success"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install frozen dependencies
+        run: uv sync --frozen
+
+      - name: Validate server import and health route
+        run: |
+          uv run python -c '
+          import asyncio
+          import httpx
+          from main import mcp
+
+          async def check():
+              app = mcp.http_app(path="/mcp", transport="streamable-http")
+              transport = httpx.ASGITransport(app=app)
+              async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                  response = await client.get("/healthz")
+              assert response.status_code == 200
+              assert response.json() == {"status": "ok"}
+
+          asyncio.run(check())
+          '
 
   test:
     runs-on: ubuntu-latest
