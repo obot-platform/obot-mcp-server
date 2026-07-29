@@ -29,9 +29,8 @@ from obot_mcp.server import (
     obot_connect_to_mcp_server as obot_connect_to_mcp_server_tool,
 )
 
-# The @mcp.tool() decorator wraps the function into a FunctionTool object.
-# Access the underlying async function via .fn for direct testing.
-obot_connect_to_mcp_server = obot_connect_to_mcp_server_tool.fn
+# FastMCP 3 preserves the decorated function, allowing direct unit testing.
+obot_connect_to_mcp_server = obot_connect_to_mcp_server_tool
 
 
 # --- Test _extract_configuration_requirements ---
